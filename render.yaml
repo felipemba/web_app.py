@@ -1,0 +1,7 @@
+services:
+  - type: web
+    name: global-forecast
+    runtime: python
+    plan: free
+    buildCommand: echo "No third-party Python dependencies to install"
+    startCommand: python web_app.py
