@@ -18,6 +18,8 @@ TIMEOUT_SECONDS = 10
 FORECAST_CACHE_SECONDS = 600
 GEOCODING_CACHE_SECONDS = 86400
 RATE_LIMIT_CACHE_SECONDS = 30
+RATE_LIMIT_COOLDOWN_SECONDS = 60
+MAX_RATE_LIMIT_COOLDOWN_SECONDS = 600
 MAX_RATE_LIMIT_RETRIES = 2
 MAX_RETRY_DELAY_SECONDS = 5
 MIN_REQUEST_INTERVAL_SECONDS = 0.2
@@ -28,6 +30,7 @@ _response_cache = {}
 _in_flight_requests = {}
 _provider_request_lock = threading.Lock()
 _last_provider_request_at = 0
+_provider_cooldown_until = 0
 
 WEATHER_CODES = {
     0: "Céu limpo",
@@ -110,10 +113,15 @@ def _retry_delay(erro, tentativa):
     return 2**tentativa
 
 
-def _abrir_url_com_intervalo(requisicao):
-    global _last_provider_request_at
+def _abrir_url_com_intervalo(requisicao, retry_rate_limit=False):
+    global _last_provider_request_at, _provider_cooldown_until
     with _provider_request_lock:
         agora = time.monotonic()
+        if not retry_rate_limit and _provider_cooldown_until > agora:
+            raise WeatherRateLimitError(
+                "o serviço meteorológico está temporariamente sobrecarregado "
+                "(limite de consultas atingido). Aguarde alguns minutos e tente novamente."
+            )
         espera = MIN_REQUEST_INTERVAL_SECONDS - (
             agora - _last_provider_request_at
         )
@@ -123,7 +131,22 @@ def _abrir_url_com_intervalo(requisicao):
         return urlopen(requisicao, timeout=TIMEOUT_SECONDS)
 
 
+def _registrar_limite_de_requisicoes(erro, tentativa):
+    global _provider_cooldown_until
+    atraso = _retry_delay(erro, tentativa)
+    pausa = min(
+        max(atraso, RATE_LIMIT_COOLDOWN_SECONDS),
+        MAX_RATE_LIMIT_COOLDOWN_SECONDS,
+    )
+    with _provider_request_lock:
+        _provider_cooldown_until = max(
+            _provider_cooldown_until,
+            time.monotonic() + pausa,
+        )
+
+
 def _solicitar_json(url_completo):
+    global _provider_cooldown_until
     requisicao = Request(
         url_completo,
         headers={"User-Agent": "CalculadoraPrevisaoTempo/1.0"},
@@ -131,8 +154,14 @@ def _solicitar_json(url_completo):
     try:
         for tentativa in range(MAX_RATE_LIMIT_RETRIES + 1):
             try:
-                with _abrir_url_com_intervalo(requisicao) as resposta:
+                with _abrir_url_com_intervalo(
+                    requisicao,
+                    retry_rate_limit=tentativa > 0,
+                ) as resposta:
                     dados = json.loads(resposta.read().decode("utf-8"))
+                if tentativa > 0:
+                    with _provider_request_lock:
+                        _provider_cooldown_until = 0
                 break
             except HTTPError as erro:
                 if erro.code != 429:
@@ -141,6 +170,7 @@ def _solicitar_json(url_completo):
                     ) from erro
 
                 espera = _retry_delay(erro, tentativa)
+                _registrar_limite_de_requisicoes(erro, tentativa)
                 erro.close()
                 if (
                     tentativa >= MAX_RATE_LIMIT_RETRIES

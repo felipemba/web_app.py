@@ -54,6 +54,9 @@ class WeatherWebAppTests(unittest.TestCase):
     def setUp(self):
         with weather._cache_lock:
             weather._response_cache.clear()
+        with weather._provider_request_lock:
+            weather._last_provider_request_at = 0
+            weather._provider_cooldown_until = 0
 
     def test_serves_app_shell_and_manifest(self):
         status, headers, body = self.request("/")
@@ -360,6 +363,28 @@ class WeatherWebAppTests(unittest.TestCase):
             weather.consultar_tempo_atual(-23.55, -46.63)
 
         self.assertEqual(abrir_url.call_count, weather.MAX_RATE_LIMIT_RETRIES + 1)
+
+    def test_rate_limit_pauses_requests_for_other_locations(self):
+        headers = Message()
+        headers["Retry-After"] = "60"
+        rate_limit = HTTPError(
+            "https://api.open-meteo.com/v1/forecast",
+            429,
+            "Too Many Requests",
+            headers,
+            None,
+        )
+
+        with (
+            patch("weather.urlopen", side_effect=rate_limit) as abrir_url,
+            self.assertRaises(weather.WeatherRateLimitError),
+        ):
+            weather.consultar_tempo_atual(-23.55, -46.63)
+
+        with self.assertRaises(weather.WeatherRateLimitError):
+            weather.consultar_tempo_atual(40.7, -74.0)
+
+        abrir_url.assert_called_once()
 
     def test_accepts_dates_up_to_two_years_ahead(self):
         hoje = date(2026, 2, 28)
