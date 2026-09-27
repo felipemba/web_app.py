@@ -19,7 +19,7 @@ Abra <http://localhost:8000>. Para usar o menu de terminal, execute `.\.venv\Scr
 2. No Windows, rode `ipconfig` e anote o endereço IPv4 da conexão Wi-Fi (por exemplo, `192.168.1.25`).
 3. Com o celular na mesma rede, abra `http://192.168.1.25:8000` no navegador. Se o Windows pedir, permita o acesso à rede privada no firewall.
 
-O servidor precisa continuar aberto no computador; a consulta da previsão também precisa de internet. O endereço de rede local em HTTP permite testar a tela no celular, mas navegadores Android exigem HTTPS para oferecer a instalação de um PWA. Para instalar, publique o app em um servidor com HTTPS e abra esse endereço no Chrome para Android; escolha **Instalar app** ou **Adicionar à tela inicial** no menu do navegador. O app abre em tela própria, com o nome e o ícone definidos no manifesto.
+O servidor precisa continuar aberto no computador; a consulta da previsão também precisa de internet. É possível selecionar qualquer data futura, mas a API meteorológica fornece previsões reais somente para os próximos 16 dias. Datas além desse limite são aceitas no formulário e recebem uma mensagem explicando a limitação, sem mostrar uma previsão inventada. O endereço de rede local em HTTP permite testar a tela no celular, mas navegadores Android exigem HTTPS para oferecer a instalação de um PWA. Para instalar, publique o app em um servidor com HTTPS e abra esse endereço no Chrome para Android; escolha **Instalar app** ou **Adicionar à tela inicial** no menu do navegador. O app abre em tela própria, com o nome e o ícone definidos no manifesto.
 
 ## Publicar para acesso pela internet
 
@@ -39,4 +39,4 @@ Com o Python do ambiente virtual:
 .\.venv\Scripts\python.exe -m unittest discover -s tests -v
 ```
 
-No celular, consulte uma cidade válida e confira condição, chuva, temperaturas, umidade e vento. Experimente datas dentro do período disponível (hoje até 15 dias à frente). A interface instalada mantém os arquivos da tela disponíveis offline; buscar uma nova previsão continua dependendo de conexão com a internet.
+No celular, consulte uma cidade válida e confira condição, chuva, temperaturas, umidade e vento. Teste uma data dentro dos próximos 16 dias e outra mais distante para conferir a mensagem de limite da API. A interface instalada mantém os arquivos da tela disponíveis offline; buscar uma nova previsão continua dependendo de conexão com a internet.

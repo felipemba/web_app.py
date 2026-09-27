@@ -1,13 +1,14 @@
 import json
 import threading
 import unittest
-from datetime import date
+from datetime import date, timedelta
 from http.server import ThreadingHTTPServer
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 from unittest.mock import patch
 
 import web_app
+import weather
 
 
 class WeatherWebAppTests(unittest.TestCase):
@@ -88,6 +89,44 @@ class WeatherWebAppTests(unittest.TestCase):
         consultar.assert_called_once()
 
     @patch("web_app.consultar_previsao")
+    def test_accepts_a_future_date_within_forecast_range(self, consultar):
+        consultar.return_value = {"cidade": "Recife, Brasil"}
+        data_futura = (date.today() + timedelta(days=10)).isoformat()
+        body = json.dumps(
+            {"cidade": "Recife", "data": data_futura}
+        ).encode("utf-8")
+
+        status, _, response_body = self.request(
+            "/api/previsao",
+            method="POST",
+            data=body,
+        )
+
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(response_body), consultar.return_value)
+        consultar.assert_called_once()
+
+    @patch("web_app.consultar_previsao")
+    def test_explains_when_future_date_exceeds_forecast_range(self, consultar):
+        consultar.side_effect = weather.ForecastUnavailableError(
+            "previsões reais estão disponíveis somente para os próximos 16 dias."
+        )
+        data_futura = (date.today() + timedelta(days=16)).isoformat()
+        body = json.dumps(
+            {"cidade": "Recife", "data": data_futura}
+        ).encode("utf-8")
+
+        status, _, response_body = self.request(
+            "/api/previsao",
+            method="POST",
+            data=body,
+        )
+
+        self.assertEqual(status, 422)
+        self.assertIn("próximos 16 dias", json.loads(response_body)["erro"])
+        consultar.assert_called_once()
+
+    @patch("web_app.consultar_previsao")
     def test_rejects_invalid_date_before_calling_weather_service(self, consultar):
         body = json.dumps(
             {"cidade": "Recife", "data": "not-a-date"}
@@ -102,6 +141,33 @@ class WeatherWebAppTests(unittest.TestCase):
         self.assertEqual(status, 400)
         self.assertIn("data", json.loads(response_body)["erro"])
         consultar.assert_not_called()
+
+    @patch("web_app.consultar_previsao")
+    def test_rejects_past_date(self, consultar):
+        data_passada = (date.today() - timedelta(days=1)).isoformat()
+        body = json.dumps(
+            {"cidade": "Recife", "data": data_passada}
+        ).encode("utf-8")
+
+        status, _, response_body = self.request(
+            "/api/previsao",
+            method="POST",
+            data=body,
+        )
+
+        self.assertEqual(status, 400)
+        self.assertIn("data deve ser hoje", json.loads(response_body)["erro"])
+        consultar.assert_not_called()
+
+    def test_forecast_range_error_is_clear_and_avoids_external_lookup(self):
+        data_futura = date.today() + timedelta(days=16)
+
+        with patch("weather._buscar_cidade") as buscar_cidade:
+            with self.assertRaises(weather.ForecastUnavailableError) as erro:
+                weather.consultar_previsao("Recife", data_futura)
+
+        self.assertIn("próximos 16 dias", str(erro.exception))
+        buscar_cidade.assert_not_called()
 
     def test_rejects_non_json_request(self):
         status, _, response_body = self.request(

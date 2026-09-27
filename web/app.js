@@ -214,7 +214,6 @@ function localDateString(date) {
 
 const today = new Date();
 dateInput.min = localDateString(today);
-dateInput.max = localDateString(new Date(today.getFullYear(), today.getMonth(), today.getDate() + 15));
 dateInput.value = dateInput.min;
 
 initializeMapWeather();

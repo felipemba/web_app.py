@@ -6,7 +6,12 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
 
-from weather import WeatherError, consultar_previsao, validar_data_previsao
+from weather import (
+    ForecastUnavailableError,
+    WeatherError,
+    consultar_previsao,
+    validar_data_previsao,
+)
 
 
 WEB_DIR = Path(__file__).resolve().parent / "web"
@@ -89,6 +94,9 @@ class WeatherRequestHandler(BaseHTTPRequestHandler):
 
         try:
             previsao = consultar_previsao(cidade.strip(), data, escolha_cidade=1)
+        except ForecastUnavailableError as erro:
+            self._responder_json(422, {"erro": str(erro)})
+            return
         except WeatherError as erro:
             self._responder_json(502, {"erro": str(erro)})
             return

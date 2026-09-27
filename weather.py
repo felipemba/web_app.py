@@ -1,5 +1,5 @@
 import json
-from datetime import date, datetime, timedelta
+from datetime import date, datetime
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
@@ -46,6 +46,10 @@ class WeatherError(Exception):
     """Erro esperado ao consultar ou interpretar dados meteorológicos."""
 
 
+class ForecastUnavailableError(WeatherError):
+    """Erro quando a data está fora do horizonte de previsão disponível."""
+
+
 def validar_data_previsao(texto, hoje=None):
     try:
         data = datetime.strptime(texto, "%Y-%m-%d").date()
@@ -53,11 +57,10 @@ def validar_data_previsao(texto, hoje=None):
         raise ValueError("data inválida; use o formato AAAA-MM-DD.") from erro
 
     hoje = hoje or date.today()
-    ultima_data = hoje + timedelta(days=MAX_FORECAST_DAYS - 1)
-    if data < hoje or data > ultima_data:
+    if data < hoje:
         raise ValueError(
-            f"a data deve estar entre {hoje.isoformat()} e "
-            f"{ultima_data.isoformat()} (limite da previsão disponível)."
+            f"a data deve ser hoje ou uma data futura "
+            f"({hoje.isoformat()} ou posterior)."
         )
     return data
 
@@ -137,8 +140,14 @@ def _formatar_medida(valor, unidade):
 
 
 def consultar_previsao(nome_cidade, data, escolha_cidade=None):
-    local = _buscar_cidade(nome_cidade, escolha_cidade)
     dias = (data - date.today()).days + 1
+    if dias > MAX_FORECAST_DAYS:
+        raise ForecastUnavailableError(
+            f"previsões reais estão disponíveis somente para os próximos "
+            f"{MAX_FORECAST_DAYS} dias; selecione uma data dentro desse período."
+        )
+
+    local = _buscar_cidade(nome_cidade, escolha_cidade)
     dados = _get_json(
         FORECAST_URL,
         {
