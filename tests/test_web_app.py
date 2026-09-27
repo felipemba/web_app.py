@@ -53,6 +53,11 @@ class WeatherWebAppTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertIn("text/html", headers["Content-Type"])
         self.assertIn(b"Global Forecast", body)
+        self.assertIn(b'id="open-radar"', body)
+        self.assertIn(b'id="radar-dialog"', body)
+        self.assertIn(b"id=\"radar-alert-list\"", body)
+        self.assertIn(b'id="radar-live-play"', body)
+        self.assertIn(b"previs\xc3\xa3o hor\xc3\xa1ria", body)
 
         status, headers, body = self.request("/manifest.webmanifest")
         self.assertEqual(status, 200)

@@ -2,6 +2,12 @@
 
 Aplicativo web mobile-first para consultar a previsão do tempo por cidade e data e acompanhar condições atuais em um mapa global. A interface é servida pelo Python e usa a lógica existente em `weather.py`, que consulta a API Open-Meteo. O programa de terminal em `main.py` continua disponível.
 
+## Radar de chuva e ventos
+
+Use **Radar** no canto superior esquerdo para abrir o painel. O mapa interativo permite selecionar qualquer ponto no mapa ou solicitar a sua localização pelo GPS do navegador. No ponto escolhido, o painel mostra a previsão por hora, de manhã à noite, para sete dias, com temperatura, chuva, vento, reprodução animada e avisos derivados da previsão. A geolocalização exige autorização do navegador e uma ligação HTTPS.
+
+Quando disponível, a camada global mostra imagens recentes do radar RainViewer; cobertura e atualizações dependem dos radares locais, e essas imagens não são previsões futuras. O marcador e a previsão horária são dados do modelo Open-Meteo para o ponto selecionado. As cores indicam precipitação prevista nesse ponto (garoa, chuva, chuva forte e extrema), não uma medição contínua da superfície. Os avisos são orientativos, não oficiais, não detectam furacões e não substituem a Defesa Civil ou os serviços meteorológicos. Em situações de risco, siga as autoridades locais. A API RainViewer é destinada ao uso pessoal, educacional e comunitário de pequena escala; consulte os [termos de uso](https://www.rainviewer.com/api.html).
+
 ## Executar no computador
 
 O servidor web é iniciado por `web_app.py` (o `main.py` continua sendo o programa de terminal):

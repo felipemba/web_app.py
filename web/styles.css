@@ -37,10 +37,149 @@ a { color: inherit; }
 .topbar {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  justify-content: flex-start;
+  gap: 17px;
   min-height: 76px;
   border-bottom: 1px solid rgb(16 38 62 / 9%);
 }
+.topbar .live-label { margin-left: auto; }
+.radar-open-button {
+  display: inline-flex;
+  min-height: 39px;
+  align-items: center;
+  gap: 7px;
+  padding: 0 14px;
+  border: 1px solid rgb(36 88 129 / 14%);
+  border-radius: 12px;
+  color: #fff;
+  background: linear-gradient(135deg, #153d5e, #2774a4);
+  box-shadow: 0 5px 14px rgb(16 38 62 / 16%);
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 750;
+  transition: transform .18s ease, box-shadow .18s ease;
+}
+.radar-open-button:hover { transform: translateY(-1px); box-shadow: 0 8px 20px rgb(16 38 62 / 22%); }
+.radar-open-button > span { color: #8fe1ff; font-size: 19px; }
+.radar-open-button:focus-visible, .radar-close-button:focus-visible, .radar-layer-button:focus-visible,
+.radar-location-button:focus-visible, .radar-play-button:focus-visible, .radar-day:focus-visible,
+.radar-hour:focus-visible { outline: 3px solid #efab72; outline-offset: 3px; }
+.radar-dialog {
+  position: fixed;
+  z-index: 2000;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: max(14px, env(safe-area-inset-top)) 14px max(14px, env(safe-area-inset-bottom));
+  background: rgb(6 18 30 / 76%);
+  backdrop-filter: blur(7px);
+}
+.radar-box {
+  width: min(100%, 1020px);
+  max-height: 100%;
+  overflow: auto;
+  padding: clamp(17px, 3vw, 28px);
+  border: 1px solid rgb(200 225 240 / 20%);
+  border-radius: 22px;
+  color: #eaf4fb;
+  background: linear-gradient(155deg, #102b43, #0b1d2f 78%);
+  box-shadow: 0 28px 100px rgb(0 0 0 / 45%);
+  overscroll-behavior: contain;
+}
+.radar-box-header, .radar-toolbar, .radar-hourly-header, .radar-alerts-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.radar-box-header { margin-bottom: 14px; }
+.radar-box-header .eyebrow { margin-bottom: 6px; color: #79bfdc; }
+.radar-box-header h2 { margin: 0; color: white; font-size: clamp(24px, 4vw, 32px); letter-spacing: -.8px; }
+.radar-intro { margin: 5px 0 0; color: #a9c2d3; font-size: 12px; }
+.radar-close-button {
+  display: grid;
+  width: 42px;
+  height: 42px;
+  flex: 0 0 auto;
+  place-items: center;
+  border: 1px solid rgb(255 255 255 / 16%);
+  border-radius: 13px;
+  color: white;
+  background: rgb(255 255 255 / 7%);
+  cursor: pointer;
+  font-size: 29px;
+  line-height: 1;
+}
+.radar-toolbar { flex-wrap: wrap; margin-bottom: 9px; }
+.radar-layer-controls { display: inline-flex; gap: 4px; padding: 4px; border: 1px solid rgb(255 255 255 / 10%); border-radius: 12px; background: rgb(0 0 0 / 16%); }
+.radar-layer-button, .radar-location-button, .radar-play-button {
+  min-height: 37px;
+  padding: 0 13px;
+  border: 1px solid rgb(255 255 255 / 12%);
+  border-radius: 9px;
+  color: #dceaf4;
+  background: rgb(255 255 255 / 5%);
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 700;
+}
+.radar-layer-button.active { border-color: #73c7eb; color: white; background: #23658a; }
+.radar-location-button { border-color: rgb(115 199 235 / 40%); color: #c8efff; }
+@media (max-width: 600px) {
+  .radar-location-button { margin-left: auto; }
+}
+.radar-status { min-height: 18px; margin: 9px 2px; color: #b9cfdd; font-size: 12px; }
+#radar-map {
+  height: clamp(240px, 39vh, 390px);
+  border: 1px solid rgb(255 255 255 / 14%);
+  border-radius: 15px;
+  background: #10263e;
+  overflow: hidden;
+}
+#radar-map .leaflet-control-zoom a { color: #16334a; }
+#radar-map .leaflet-control-attribution { font-size: 9px; }
+.radar-legend { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; padding: 11px 2px; color: #d3e2ec; font-size: 11px; }
+.radar-legend > span:not(.radar-legend-note) { display: inline-flex; align-items: center; gap: 6px; }
+.radar-legend i { width: 10px; height: 10px; border-radius: 50%; background: var(--legend-color); box-shadow: 0 0 10px color-mix(in srgb, var(--legend-color) 55%, transparent); }
+.legend-drizzle { --legend-color: #42a66c; }
+.legend-rain { --legend-color: #2584d8; }
+.legend-heavy { --legend-color: #f28c28; }
+.legend-extreme { --legend-color: #e53935; }
+.radar-legend-note { margin-left: auto; color: #94adbf; font-size: 10px; }
+.radar-data-note { margin: 0 1px 10px; color: #94adbf; font-size: 10px; line-height: 1.5; }
+.radar-location-summary { overflow-wrap: anywhere; padding: 10px 12px; border: 1px solid rgb(133 194 223 / 19%); border-radius: 11px; color: #d9eef8; background: rgb(85 153 188 / 10%); font-size: 12px; font-weight: 650; }
+.radar-week { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 7px; margin: 12px 0 15px; }
+.radar-day { display: grid; min-width: 0; gap: 5px; justify-items: center; padding: 9px 4px; border: 1px solid rgb(255 255 255 / 11%); border-radius: 11px; color: #cfdfeb; background: rgb(255 255 255 / 4%); cursor: pointer; }
+.radar-day.selected { border-color: #70c7ed; color: white; background: rgb(44 116 153 / 35%); box-shadow: inset 0 0 0 1px rgb(112 199 237 / 17%); }
+.radar-day-name { overflow: hidden; max-width: 100%; color: #a9c4d5; font-size: 10px; text-overflow: ellipsis; text-transform: capitalize; }
+.radar-day-icon { font-size: 19px; }
+.radar-day-temperatures { white-space: nowrap; font-size: 10px; font-weight: 700; }
+.radar-hourly-header { margin: 4px 0 0; }
+.radar-hourly-header h3, .radar-alerts-heading h3 { margin: 0; color: #f2f8fc; font-size: 14px; }
+.radar-play-button { min-height: 32px; }
+.radar-play-button:disabled { cursor: not-allowed; opacity: .45; }
+.radar-time-slider { width: 100%; margin: 10px 0 12px; accent-color: #69c4e8; cursor: pointer; }
+.radar-time-slider:disabled { cursor: not-allowed; opacity: .45; }
+.radar-hourly { display: grid; grid-auto-columns: 76px; grid-auto-flow: column; gap: 7px; min-height: 90px; overflow-x: auto; padding: 2px 1px 9px; scrollbar-color: #447b98 transparent; }
+.radar-hour { display: grid; min-height: 78px; align-content: center; justify-items: center; gap: 5px; border: 1px solid rgb(255 255 255 / 11%); border-radius: 10px; color: #aac1d0; background: rgb(255 255 255 / 4%); cursor: pointer; font-size: 10px; }
+.radar-hour.selected { border-color: #80c9e7; color: white; background: rgb(46 116 150 / 40%); }
+.radar-hour-rain { color: var(--rain-color); font-weight: 700; }
+.radar-hour strong { color: #f7f9fa; font-size: 16px; }
+.radar-alerts { margin-top: 12px; padding: 14px; border: 1px solid rgb(255 255 255 / 11%); border-radius: 13px; background: rgb(255 255 255 / 4%); }
+.radar-alerts-heading { margin-bottom: 9px; }
+.radar-alerts-heading > span { color: #9db5c5; font-size: 10px; }
+#radar-alert-list { color: #c4d6e1; font-size: 12px; line-height: 1.5; }
+.radar-alert { margin: 6px 0; padding: 9px 11px; border-left: 3px solid var(--alert-color); border-radius: 5px; color: #f5f8fa; background: color-mix(in srgb, var(--alert-color) 13%, transparent); }
+.radar-alert-warning { --alert-color: #f5ad42; }
+.radar-alert-danger { --alert-color: #f05c5c; }
+.radar-safety-note, .radar-attribution { margin: 9px 1px 0; color: #92aabb; font-size: 10px; line-height: 1.5; }
+.radar-attribution a { color: #9edcf6; }
+.radar-rain-pulse { animation: radar-rain-pulse 1.7s ease-out infinite; }
+.radar-wind-icon { border: 0; background: transparent; }
+.radar-wind-arrow { display: grid; width: 40px; height: 40px; place-items: center; border: 1px solid rgb(255 255 255 / 70%); border-radius: 50%; color: white; background: rgb(21 88 130 / 85%); box-shadow: 0 0 18px rgb(80 198 240 / 68%); font-size: 25px; transform: rotate(var(--wind-direction)); animation: radar-wind-flow 1.5s ease-in-out infinite; }
+@keyframes radar-rain-pulse { 0% { stroke-opacity: .9; fill-opacity: .65; transform: scale(.72); } 100% { stroke-opacity: 0; fill-opacity: .08; transform: scale(1.7); } }
+@keyframes radar-wind-flow { 0%, 100% { translate: 0 0; } 50% { translate: 0 -4px; } }
+body.radar-open { overflow: hidden; }
 .brand {
   display: inline-flex;
   align-items: center;
@@ -323,9 +462,10 @@ h1 span { color: #638096; font-weight: 450; }
 
 @media (max-width: 600px) {
   .app-shell { width: min(100% - 30px, 460px); }
-  .topbar { min-height: 66px; }
-  .brand { font-size: 17px; }
-  .brand-mark { width: 32px; height: 32px; }
+  .topbar { min-height: 66px; gap: 8px; }
+  .brand { gap: 7px; font-size: 15px; }
+  .brand-mark { width: 30px; height: 30px; }
+  .radar-open-button { min-height: 36px; gap: 5px; padding-inline: 10px; font-size: 12px; }
   .live-label { font-size: 11px; }
   main { padding: 32px 0 42px; }
   .eyebrow { font-size: 9px; }
@@ -353,6 +493,14 @@ h1 span { color: #638096; font-weight: 450; }
   .app-footer p { max-width: 270px; line-height: 1.5; }
 }
 
+@media (max-width: 360px) {
+  .topbar .live-label { display: none; }
+  .radar-dialog { padding-inline: 7px; }
+  .radar-box { padding: 14px 11px; border-radius: 17px; }
+  .radar-day-temperatures { font-size: 9px; }
+}
+
 @media (prefers-reduced-motion: reduce) {
+  .radar-rain-pulse, .radar-wind-arrow { animation: none; }
   *, *::before, *::after { scroll-behavior: auto !important; transition-duration: .01ms !important; animation-duration: .01ms !important; animation-iteration-count: 1 !important; }
 }

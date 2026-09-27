@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <meta name="theme-color" content="#10263e" />
-    <meta name="description" content="Consulte a previsão do tempo para sua cidade, hoje ou nos próximos dias." />
+    <meta name="description" content="Consulte a previsão do tempo e explore o radar global de chuva e vento." />
     <meta name="mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
@@ -20,6 +20,9 @@
   <body>
     <div class="app-shell">
       <header class="topbar">
+        <button class="radar-open-button" id="open-radar" type="button" aria-haspopup="dialog" aria-controls="radar-dialog" aria-expanded="false">
+          <span aria-hidden="true">◉</span> Radar
+        </button>
         <a class="brand" href="/" aria-label="Global Forecast, início">
           <span class="brand-mark" aria-hidden="true">☼</span>
           <span>Global<span class="brand-light"> Forecast</span></span>
@@ -32,6 +35,59 @@
           <p class="eyebrow">MONITORAMENTO GLOBAL</p>
           <h1 id="page-title">O tempo ao redor<br /><span>do planeta.</span></h1>
           <p class="intro-copy">Acompanhe as condições atuais em cidades de diferentes regiões do mundo.</p>
+        </section>
+
+        <section class="radar-dialog" id="radar-dialog" role="dialog" aria-modal="true" aria-labelledby="radar-title" hidden>
+          <div class="radar-box">
+            <header class="radar-box-header">
+              <div>
+                <p class="eyebrow">RADAR METEOROLÓGICO</p>
+                <h2 id="radar-title">Chuva e ventos</h2>
+                <p class="radar-intro">Explore o radar recente e a previsão horária para qualquer ponto do mapa.</p>
+              </div>
+              <button class="radar-close-button" id="close-radar" type="button" aria-label="Fechar radar">×</button>
+            </header>
+
+            <div class="radar-toolbar">
+              <div class="radar-layer-controls" role="group" aria-label="Camada do radar">
+                <button class="radar-layer-button active" type="button" data-radar-layer="rain">Chuva</button>
+                <button class="radar-layer-button" type="button" data-radar-layer="wind">Ventos</button>
+              </div>
+              <button class="radar-play-button" id="radar-live-play" type="button" aria-pressed="false" disabled>▶ Animar radar</button>
+              <button class="radar-location-button" id="radar-location" type="button">Usar minha localização</button>
+            </div>
+
+            <p class="radar-status" id="radar-status" role="status" aria-live="polite">Abra o radar para carregar os dados meteorológicos.</p>
+            <div id="radar-map" aria-label="Mapa interativo do radar global de chuva; clique para consultar um local"></div>
+            <div class="radar-legend" aria-label="Legenda da intensidade da chuva">
+              <span><i class="legend-drizzle"></i>Garoa</span>
+              <span><i class="legend-rain"></i>Chuva</span>
+              <span><i class="legend-heavy"></i>Forte</span>
+              <span><i class="legend-extreme"></i>Extrema</span>
+              <span class="radar-legend-note">Cores da previsão no ponto selecionado</span>
+            </div>
+            <p class="radar-data-note">A camada global mostra imagens recentes dos radares disponíveis. O marcador, a animação horária e as temperaturas mostram a previsão do modelo para o ponto selecionado.</p>
+
+            <div class="radar-location-summary" id="radar-location-summary">
+              Selecione um ponto no mapa ou use sua localização para ver a previsão.
+            </div>
+            <div class="radar-week" id="radar-week" aria-label="Previsão para os próximos sete dias"></div>
+            <div class="radar-hourly-header">
+              <h3 id="radar-hourly-title">Previsão horária</h3>
+              <button class="radar-play-button" id="radar-play" type="button" aria-pressed="false" disabled>▶ Animar</button>
+            </div>
+            <input class="radar-time-slider" id="radar-time" type="range" min="0" max="0" value="0" aria-label="Selecionar hora da previsão" disabled />
+            <div class="radar-hourly" id="radar-hourly" aria-live="polite"></div>
+            <div class="radar-alerts" aria-labelledby="radar-alerts-title">
+              <div class="radar-alerts-heading">
+                <h3 id="radar-alerts-title">Alertas para o local</h3>
+                <span>Próximas 24 horas</span>
+              </div>
+              <div id="radar-alert-list" role="status" aria-live="polite">Selecione um local para consultar as condições previstas.</div>
+              <p class="radar-safety-note">Avisos baseados na previsão meteorológica, não são alertas oficiais nem detectam furacões. Em situações de risco, siga a Defesa Civil e os serviços locais.</p>
+            </div>
+            <p class="radar-attribution">Previsão: <a href="https://open-meteo.com/" target="_blank" rel="noreferrer">Open-Meteo</a>. Radar recente: <a href="https://www.rainviewer.com/" target="_blank" rel="noreferrer">RainViewer</a>. Mapa: OpenStreetMap.</p>
+          </div>
         </section>
 
         <section class="weather-map-panel" aria-labelledby="weather-map-title">
