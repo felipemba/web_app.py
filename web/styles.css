@@ -229,6 +229,7 @@ h1 span { color: #638096; font-weight: 450; }
   box-shadow: var(--shadow);
 }
 .field label { display: block; margin: 0 0 8px 3px; color: #53697c; font-size: 12px; font-weight: 700; }
+.field-hint { margin: 6px 0 0 3px; color: #738597; font-size: 11px; line-height: 1.4; }
 .input-wrap {
   display: flex;
   min-width: 0;

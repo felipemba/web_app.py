@@ -1,4 +1,5 @@
 import json
+from calendar import monthrange
 from datetime import date, datetime
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
@@ -8,6 +9,7 @@ from urllib.request import Request, urlopen
 GEOCODING_URL = "https://geocoding-api.open-meteo.com/v1/search"
 FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
 MAX_FORECAST_DAYS = 16
+MAX_FUTURE_YEARS = 2
 TIMEOUT_SECONDS = 10
 
 WEATHER_CODES = {
@@ -61,6 +63,14 @@ def validar_data_previsao(texto, hoje=None):
         raise ValueError(
             f"a data deve ser hoje ou uma data futura "
             f"({hoje.isoformat()} ou posterior)."
+        )
+    ano_limite = hoje.year + MAX_FUTURE_YEARS
+    dia_limite = min(hoje.day, monthrange(ano_limite, hoje.month)[1])
+    ultima_data = hoje.replace(year=ano_limite, day=dia_limite)
+    if data > ultima_data:
+        raise ValueError(
+            f"a data deve ser até dois anos à frente "
+            f"({ultima_data.isoformat()} ou anterior)."
         )
     return data
 

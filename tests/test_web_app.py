@@ -169,6 +169,30 @@ class WeatherWebAppTests(unittest.TestCase):
         self.assertIn("próximos 16 dias", str(erro.exception))
         buscar_cidade.assert_not_called()
 
+    def test_accepts_dates_up_to_two_years_ahead(self):
+        hoje = date(2026, 2, 28)
+
+        self.assertEqual(
+            weather.validar_data_previsao("2028-02-28", hoje=hoje),
+            date(2028, 2, 28),
+        )
+
+    def test_two_year_limit_handles_leap_day(self):
+        hoje = date(2024, 2, 29)
+
+        self.assertEqual(
+            weather.validar_data_previsao("2026-02-28", hoje=hoje),
+            date(2026, 2, 28),
+        )
+        with self.assertRaisesRegex(ValueError, "até dois anos"):
+            weather.validar_data_previsao("2026-03-01", hoje=hoje)
+
+    def test_rejects_dates_more_than_two_years_ahead(self):
+        hoje = date(2026, 9, 26)
+
+        with self.assertRaisesRegex(ValueError, "até dois anos"):
+            weather.validar_data_previsao("2028-09-27", hoje=hoje)
+
     def test_rejects_non_json_request(self):
         status, _, response_body = self.request(
             "/api/previsao",

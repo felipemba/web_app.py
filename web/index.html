@@ -67,8 +67,9 @@
             <label for="forecast-date">Data da previsão</label>
             <div class="input-wrap">
               <span class="input-icon calendar-icon" aria-hidden="true">▦</span>
-              <input id="forecast-date" name="date" type="date" required />
+              <input id="forecast-date" name="date" type="date" aria-describedby="forecast-date-hint" required />
             </div>
+            <p class="field-hint" id="forecast-date-hint">Datas até 2 anos. Previsões reais: próximos 16 dias.</p>
           </div>
           <button class="search-button" id="search-button" type="submit">
             <span class="button-label">Consultar previsão</span>
