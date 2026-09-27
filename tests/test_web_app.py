@@ -586,6 +586,31 @@ class WeatherWebAppTests(unittest.TestCase):
         self.assertEqual(points[0]["current"]["weather_code"], 1)
         self.assertEqual(consultar.call_count, len(web_app.WEATHER_POINTS))
 
+    def test_simultaneous_map_requests_share_one_upstream_batch(self):
+        def current_weather(latitude, longitude):
+            time.sleep(0.05)
+            return {
+                "current": {
+                    "temperature_2m": 20,
+                    "precipitation": 0,
+                    "wind_speed_10m": 5,
+                    "weather_code": 1,
+                }
+            }
+
+        with patch(
+            "web_app.consultar_tempo_atual",
+            side_effect=current_weather,
+        ) as consultar:
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                responses = list(
+                    executor.map(lambda _: self.request("/api/mapa"), range(2))
+                )
+
+        self.assertEqual([response[0] for response in responses], [200, 200])
+        self.assertEqual(json.loads(responses[0][2]), json.loads(responses[1][2]))
+        self.assertEqual(consultar.call_count, len(web_app.WEATHER_POINTS))
+
     def test_radar_forecast_is_proxied_and_rejects_invalid_coordinates(self):
         forecast = {"hourly": {"time": []}, "daily": {"time": []}}
         with patch(
@@ -624,6 +649,18 @@ class WeatherWebAppTests(unittest.TestCase):
         self.assertEqual(results, [{"value": [1]}] * 8)
         results[0]["value"].append(2)
         self.assertEqual(weather._cache_result(key, 60, load), {"value": [1]})
+
+    def test_expired_cache_entries_are_removed_during_reads(self):
+        expired_key = ("expired-entry", time.monotonic())
+        with weather._cache_lock:
+            weather._cache[expired_key] = (time.monotonic() - 1, {"old": True})
+
+        self.assertEqual(
+            weather._cache_result(("fresh-entry",), 60, lambda: {"new": True}),
+            {"new": True},
+        )
+        with weather._cache_lock:
+            self.assertNotIn(expired_key, weather._cache)
 
     def test_identical_city_and_date_reuses_forecast_cache(self):
         data = date.today()

@@ -3,7 +3,9 @@ import json
 import math
 import mimetypes
 import os
-from concurrent.futures import ThreadPoolExecutor
+import threading
+from concurrent.futures import Future, ThreadPoolExecutor
+from copy import deepcopy
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from math import ceil
@@ -27,6 +29,12 @@ from weather import (
 
 WEB_DIR = Path(__file__).resolve().parent / "web"
 MAX_REQUEST_BYTES = 8192
+MAP_EXECUTOR = ThreadPoolExecutor(
+    max_workers=4,
+    thread_name_prefix="weather-map",
+)
+_map_lock = threading.Lock()
+_map_in_flight = None
 WEATHER_POINTS = (
     {"name": "Nova York", "lat": 40.7128, "lon": -74.0060, "country": "EUA"},
     {"name": "São Paulo", "lat": -23.5505, "lon": -46.6333, "country": "Brasil"},
@@ -63,6 +71,46 @@ def _previsao_mapa(ponto):
     }
 
 
+def _obter_previsoes_mapa():
+    global _map_in_flight
+    with _map_lock:
+        future = _map_in_flight
+        is_owner = future is None
+        if is_owner:
+            future = Future()
+            _map_in_flight = future
+
+    if not is_owner:
+        return deepcopy(future.result())
+
+    try:
+        requests = [
+            MAP_EXECUTOR.submit(_previsao_mapa, ponto)
+            for ponto in WEATHER_POINTS
+        ]
+        resultados = []
+        primeiro_erro = None
+        for ponto, request in zip(WEATHER_POINTS, requests):
+            try:
+                resultados.append(request.result())
+            except WeatherUpstreamError as erro:
+                if primeiro_erro is None or erro.status == 429:
+                    primeiro_erro = erro
+                resultados.append({**ponto, "erro": str(erro)})
+            except (WeatherError, ValueError) as erro:
+                resultados.append({**ponto, "erro": str(erro)})
+        resultado = (resultados, primeiro_erro)
+        future.set_result(resultado)
+        return deepcopy(resultado)
+    except BaseException as erro:
+        future.set_exception(erro)
+        raise
+    finally:
+        with _map_lock:
+            if _map_in_flight is future:
+                _map_in_flight = None
+
+
 class WeatherRequestHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         requisicao = urlsplit(self.path)
@@ -97,22 +145,7 @@ class WeatherRequestHandler(BaseHTTPRequestHandler):
             return
 
         if caminho == "/api/mapa":
-            with ThreadPoolExecutor(max_workers=4) as executor:
-                requisicoes = [
-                    executor.submit(_previsao_mapa, ponto)
-                    for ponto in WEATHER_POINTS
-                ]
-                resultados = []
-                primeiro_erro = None
-                for ponto, requisicao in zip(WEATHER_POINTS, requisicoes):
-                    try:
-                        resultados.append(requisicao.result())
-                    except WeatherUpstreamError as erro:
-                        if primeiro_erro is None or erro.status == 429:
-                            primeiro_erro = erro
-                        resultados.append({**ponto, "erro": str(erro)})
-                    except (WeatherError, ValueError) as erro:
-                        resultados.append({**ponto, "erro": str(erro)})
+            resultados, primeiro_erro = _obter_previsoes_mapa()
             if primeiro_erro is not None:
                 self._responder_erro_meteorologico(primeiro_erro)
                 return

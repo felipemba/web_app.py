@@ -109,6 +109,7 @@ class WeatherRateLimitError(WeatherUpstreamError):
 def _cache_result(key, ttl_seconds, loader):
     now = time.monotonic()
     with _cache_lock:
+        _limpar_cache_expirado(now)
         cached = _cache.get(key)
         if cached is not None and cached[0] > now:
             return deepcopy(cached[1])
@@ -142,6 +143,17 @@ def _cache_result(key, ttl_seconds, loader):
     finally:
         with _cache_lock:
             _in_flight.pop(key, None)
+
+
+def _limpar_cache_expirado(now=None):
+    now = time.monotonic() if now is None else now
+    expired = [
+        cached_key
+        for cached_key, (expires_at, _) in _cache.items()
+        if expires_at <= now
+    ]
+    for cached_key in expired:
+        _cache.pop(cached_key, None)
 
 
 def _response_rate_headers(headers):
