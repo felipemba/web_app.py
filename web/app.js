@@ -4,6 +4,12 @@ const dateInput = document.querySelector("#forecast-date");
 const searchButton = document.querySelector("#search-button");
 const buttonLabel = searchButton.querySelector(".button-label");
 const message = document.querySelector("#form-message");
+const quotaAvailable = document.querySelector("#quota-available");
+const quotaUsed = document.querySelector("#quota-used");
+const quotaLimit = document.querySelector("#quota-limit");
+const quotaRenewal = document.querySelector("#quota-renewal");
+const quotaNote = document.querySelector("#quota-note");
+const quotaRetryButton = document.querySelector("#quota-retry");
 const emptyState = document.querySelector("#empty-state");
 const forecast = document.querySelector("#forecast");
 const mapButtons = [...document.querySelectorAll(".map-mode")];
@@ -37,8 +43,10 @@ const weatherPoints = [
 let weatherMapInstance = null;
 let weatherLayers = [];
 let currentMapMode = "temperature";
+let globalWeatherLoading = false;
 let radarMap = null;
 let radarRainLayer = null;
+let radarRainRequestStarted = false;
 let radarPointLayer = null;
 let radarFrames = [];
 let radarFrameIndex = 0;
@@ -50,10 +58,95 @@ let radarLayerMode = "rain";
 let radarAnimationTimer = null;
 let radarFrameTimer = null;
 let radarRequestId = 0;
+let radarRequestController = null;
 let radarLastFocusedElement = null;
-
-const RADAR_FORECAST_URL = "https://api.open-meteo.com/v1/forecast";
 const RAINVIEWER_API_URL = "https://api.rainviewer.com/public/weather-maps.json";
+
+function formatTimeUntil(timestamp) {
+  const milliseconds = new Date(timestamp).getTime() - Date.now();
+  if (!Number.isFinite(milliseconds) || milliseconds <= 0) return null;
+  const totalMinutes = Math.ceil(milliseconds / 60000);
+  const hours = Math.floor(totalMinutes / 60);
+  const minutes = totalMinutes % 60;
+  return {
+    duration: `${hours} horas e ${minutes} minutos`,
+    time: new Date(timestamp).toLocaleTimeString("pt-BR", {
+      hour: "2-digit",
+      minute: "2-digit",
+      timeZoneName: "short",
+    }),
+  };
+}
+
+function retryAfterDate(value) {
+  if (!value) return null;
+  const seconds = Number(value);
+  const timestamp = Number.isFinite(seconds)
+    ? Date.now() + Math.max(0, seconds) * 1000
+    : Date.parse(value);
+  const retryAt = new Date(timestamp);
+  return Number.isFinite(retryAt.getTime()) ? retryAt.toISOString() : null;
+}
+
+async function refreshQuotaStatus() {
+  try {
+    const response = await fetch("/api/diagnostico", { cache: "no-store" });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const data = await response.json();
+    quotaAvailable.textContent = "Não informado pela API";
+    quotaUsed.textContent = `${data.consultas_observadas_desde_inicializacao} tentativas iniciadas nesta instância; a API não confirma o consumo individual`;
+    quotaLimit.textContent = data.limite_informado_pelo_servidor
+      ? `${data.limite_informado_pelo_servidor} (janela não especificada)`
+      : data.limite_diario_oficial;
+    quotaRenewal.textContent = data.horario_de_renovacao
+      ? new Date(data.horario_de_renovacao).toLocaleTimeString("pt-BR", {
+        hour: "2-digit",
+        minute: "2-digit",
+        timeZoneName: "short",
+      })
+      : "Não informado pela API";
+    const parts = [
+      `${data.api}; ${data.plano}.`,
+      "O contador interno registra tentativas iniciadas desde que esta instância subiu; pode incluir falhas e não representa o consumo confirmado nem o uso de outros servidores/clientes.",
+      "O horário de renovação só aparece quando informado pelos headers da API.",
+    ];
+    const retry = data.proxima_consulta_disponivel
+      ? formatTimeUntil(data.proxima_consulta_disponivel)
+      : null;
+    if (retry) {
+      parts.push(`Novas consultas suspensas até aproximadamente ${retry.time} (${retry.duration}).`);
+    } else if (data.tentativa_manual_necessaria) {
+      parts.push("A API não informou quando liberar. Nenhuma chamada será repetida automaticamente; libere uma tentativa manual quando desejar.");
+    }
+    if (data.headers_de_limite && Object.keys(data.headers_de_limite).length > 0) {
+      parts.push("Headers de limite recebidos: " + Object.entries(data.headers_de_limite)
+        .map(([name, value]) => `${name}: ${value}`)
+        .join("; ") + ". A API não identificou a janela desses valores; eles não são um saldo diário.");
+    }
+    quotaNote.textContent = parts.join(" ");
+    quotaRetryButton.hidden = !data.tentativa_manual_necessaria;
+  } catch {
+    quotaNote.textContent = "Não foi possível consultar o diagnóstico do serviço.";
+  }
+}
+
+quotaRetryButton.addEventListener("click", async () => {
+  quotaRetryButton.disabled = true;
+  try {
+    const response = await fetch("/api/tentar-novamente", { method: "POST" });
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.erro || "Não foi possível liberar a tentativa.");
+    await refreshQuotaStatus();
+    if (result.liberada) {
+      quotaNote.textContent += " " + result.mensagem
+        + " Nenhuma consulta meteorológica foi feita automaticamente.";
+    }
+  } catch (error) {
+    quotaNote.textContent = error.message;
+  } finally {
+    quotaRetryButton.disabled = false;
+  }
+});
 
 function getMapModeColor(mode, value) {
   if (mode === "rain") {
@@ -159,47 +252,44 @@ function renderWeatherMap() {
 }
 
 async function loadGlobalWeather() {
-  if (!weatherPoints.length) return;
+  if (!weatherPoints.length || globalWeatherLoading) return;
 
+  globalWeatherLoading = true;
   mapStatus.textContent = "Atualizando condições meteorológicas...";
-  const results = await Promise.allSettled(
-    weatherPoints.map(async (point) => {
-      const url = `https://api.open-meteo.com/v1/forecast?latitude=${point.lat}&longitude=${point.lon}&current=temperature_2m,precipitation,wind_speed_10m,weather_code&timezone=auto&forecast_days=1`;
-      const response = await fetch(url, { cache: "no-store" });
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      const data = await response.json();
-      const current = data.current;
-      if (!current || ![
-        current.temperature_2m,
-        current.precipitation,
-        current.wind_speed_10m,
-        current.weather_code,
-      ].every((value) => Number.isFinite(Number(value)))) {
-        throw new Error("Resposta meteorológica inválida.");
-      }
-
+  try {
+    const response = await fetch("/api/mapa", { cache: "no-store" });
+    const results = await response.json();
+    if (!response.ok) {
+      const error = new Error(results.erro || "Não foi possível atualizar o mapa.");
+      error.rateLimit = results.rate_limit;
+      throw error;
+    }
+    const conditionMap = {
+      0: "céu limpo",
+      1: "predominantemente limpo",
+      2: "parcialmente nublado",
+      3: "nublado",
+      45: "nevoeiro",
+      48: "nevoeiro com geada",
+      51: "garoa leve",
+      53: "garoa moderada",
+      55: "garoa intensa",
+      61: "chuva leve",
+      63: "chuva moderada",
+      65: "chuva intensa",
+      80: "pancadas de chuva",
+      81: "pancadas de chuva moderadas",
+      82: "pancadas de chuva fortes",
+      95: "trovoada",
+      96: "trovoada com granizo",
+      99: "trovoada com granizo intenso",
+    };
+    const failures = results.filter((result) => result.erro).length;
+    results.forEach((result) => {
+      const point = weatherPoints.find((item) => item.name === result.name);
+      if (!point || result.erro) return;
+      const current = result.current;
       const weatherCode = Number(current.weather_code);
-      const conditionMap = {
-        0: "céu limpo",
-        1: "predominantemente limpo",
-        2: "parcialmente nublado",
-        3: "nublado",
-        45: "nevoeiro",
-        48: "nevoeiro com geada",
-        51: "garoa leve",
-        53: "garoa moderada",
-        55: "garoa intensa",
-        61: "chuva leve",
-        63: "chuva moderada",
-        65: "chuva intensa",
-        80: "pancadas de chuva",
-        81: "pancadas de chuva moderadas",
-        82: "pancadas de chuva fortes",
-        95: "trovoada",
-        96: "trovoada com granizo",
-        99: "trovoada com granizo intenso",
-      };
-
       point.current = {
         temperature: Math.round(Number(current.temperature_2m)),
         precipitation: Number(current.precipitation),
@@ -207,20 +297,34 @@ async function loadGlobalWeather() {
         storm: [95, 96, 99].includes(weatherCode),
         condition: conditionMap[weatherCode] || "condição variável",
       };
-    })
-  );
-
-  const failures = results.filter((result) => result.status === "rejected").length;
-  const availablePoints = weatherPoints.filter((point) => point.current).length;
-  renderWeatherMap();
-  if (failures === weatherPoints.length) {
-    mapStatus.textContent = availablePoints
-      ? "Falha na atualização. Exibindo as últimas leituras disponíveis."
-      : "Não foi possível carregar os dados meteorológicos. Verifique sua conexão e tente novamente.";
-  } else if (failures > 0) {
-    mapStatus.textContent = `Dados parciais: ${failures} de ${weatherPoints.length} cidades sem atualização. Leituras anteriores foram preservadas.`;
-  } else {
-    mapStatus.textContent = `Dados atualizados às ${new Date().toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" })}.`;
+    });
+    renderWeatherMap();
+    if (failures > 0) {
+      const availablePoints = weatherPoints.filter((point) => point.current).length;
+      mapStatus.textContent = availablePoints
+        ? `Dados parciais: ${failures} de ${weatherPoints.length} cidades sem atualização. Leituras anteriores foram preservadas.`
+        : "Não foi possível carregar os dados meteorológicos.";
+    } else {
+      mapStatus.textContent = "Dados consultados. Respostas repetidas são reutilizadas pelo cache do servidor por até 10 minutos.";
+    }
+  } catch (error) {
+    mapStatus.textContent = error.rateLimit
+      ? `${error.message} Consulte o diagnóstico de limite abaixo.`
+      : `${error.message} Leituras anteriores foram preservadas.`;
+    if (error.rateLimit) {
+      const retry = error.rateLimit.proxima_consulta_disponivel;
+      if (retry) {
+        const remaining = formatTimeUntil(retry);
+        if (remaining) {
+          mapStatus.textContent += ` Próxima consulta disponível após ${remaining.duration}, por volta de ${remaining.time}.`;
+        }
+      } else {
+        mapStatus.textContent += " A API não informou quando liberar; use a opção de tentativa manual no diagnóstico.";
+      }
+    }
+  } finally {
+    globalWeatherLoading = false;
+    await refreshQuotaStatus();
   }
 }
 
@@ -231,11 +335,7 @@ function initializeMapWeather() {
     mapStatus.textContent = "Não foi possível carregar o mapa. Verifique sua conexão e tente novamente.";
     return;
   }
-  const refresh = async () => {
-    await loadGlobalWeather();
-    setTimeout(refresh, 120000);
-  };
-  refresh();
+  void loadGlobalWeather();
 }
 
 function rainIntensity(precipitation) {
@@ -308,11 +408,19 @@ function initializeRadarMap() {
 }
 
 async function loadRainViewerFrames() {
-  if (!radarMap) return;
+  if (!radarMap || radarRainRequestStarted) return;
+  radarRainRequestStarted = true;
 
   try {
     const response = await fetch(RAINVIEWER_API_URL, { cache: "no-store" });
-    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    if (!response.ok) {
+      const error = new Error(`HTTP ${response.status}`);
+      error.status = response.status;
+      error.retryAt = response.status === 429
+        ? retryAfterDate(response.headers.get("Retry-After"))
+        : null;
+      throw error;
+    }
     const data = await response.json();
     const frames = data?.radar?.past;
     if (!Array.isArray(frames) || frames.length === 0 || typeof data.host !== "string") {
@@ -339,15 +447,14 @@ async function loadRainViewerFrames() {
     if (radarLayerMode === "rain") radarRainLayer.addTo(radarMap);
     const observedAt = new Date(frame.time * 1000);
     radarStatus.textContent = `Imagem recente de radar, gerada às ${observedAt.toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" })}. Clique no mapa para consultar a previsão desse local.`;
-    if (
-      !radarDialog.hidden
-      && radarLayerMode === "rain"
-      && !window.matchMedia("(prefers-reduced-motion: reduce)").matches
-    ) {
-      startRadarFrameAnimation();
-    }
   } catch (error) {
-    radarStatus.textContent = `Radar recente indisponível: ${error.message} A previsão no local selecionado continua disponível.`;
+    const retry = error.retryAt ? formatTimeUntil(error.retryAt) : null;
+    const retryMessage = error.status === 429
+      ? retry
+        ? ` O servidor informou nova tentativa por volta de ${retry.time} (em ${retry.duration}).`
+        : " A API não informou quando liberar; não haverá nova tentativa automática. Recarregue a página para tentar manualmente."
+      : "";
+    radarStatus.textContent = `Radar recente indisponível: ${error.message}.${retryMessage} A previsão no local selecionado continua disponível.`;
   }
 }
 
@@ -553,6 +660,8 @@ function renderRadarAlerts(data) {
 async function loadRadarForecast(latitude, longitude) {
   if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) return;
   const requestId = ++radarRequestId;
+  radarRequestController?.abort();
+  radarRequestController = new AbortController();
   radarForecastData = null;
   radarSelectedHours = [];
   radarWeek.replaceChildren();
@@ -568,15 +677,17 @@ async function loadRadarForecast(latitude, longitude) {
     const parameters = new URLSearchParams({
       latitude: String(latitude),
       longitude: String(longitude),
-      daily: "weather_code,temperature_2m_min,temperature_2m_max",
-      hourly: "temperature_2m,precipitation,wind_speed_10m,wind_direction_10m,wind_gusts_10m,weather_code",
-      current: "temperature_2m,precipitation,wind_speed_10m,weather_code",
-      forecast_days: "7",
-      timezone: "auto",
     });
-    const response = await fetch(`${RADAR_FORECAST_URL}?${parameters}`, { cache: "no-store" });
-    if (!response.ok) throw new Error(`serviço meteorológico indisponível (HTTP ${response.status}).`);
+    const response = await fetch(`/api/radar?${parameters}`, {
+      cache: "no-store",
+      signal: radarRequestController.signal,
+    });
     const data = await response.json();
+    if (!response.ok) {
+      const error = new Error(data.erro || `serviço meteorológico indisponível (HTTP ${response.status}).`);
+      error.rateLimit = data.rate_limit;
+      throw error;
+    }
     const hourlyVariables = [
       "time",
       "temperature_2m",
@@ -611,8 +722,18 @@ async function loadRadarForecast(latitude, longitude) {
   } catch (error) {
     if (requestId !== radarRequestId) return;
     radarStatus.textContent = error.message;
+    if (error.rateLimit) {
+      const retry = error.rateLimit.proxima_consulta_disponivel;
+      const remaining = retry ? formatTimeUntil(retry) : null;
+      radarStatus.textContent += remaining
+        ? ` Próxima consulta disponível após ${remaining.duration}, por volta de ${remaining.time}.`
+        : " A API não informou quando liberar; use a opção de tentativa manual no diagnóstico.";
+    }
     radarAlertList.textContent = "Não foi possível consultar alertas sem os dados da previsão.";
     radarLocationSummary.textContent = formatRadarCoordinates(latitude, longitude);
+  } finally {
+    if (requestId === radarRequestId) radarRequestController = null;
+    await refreshQuotaStatus();
   }
 }
 
@@ -625,9 +746,6 @@ function setRadarLayer(mode) {
     if (mode === "rain") {
       radarRainLayer.addTo(radarMap);
       radarLivePlayButton.disabled = radarFrames.length < 2;
-      if (!window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
-        startRadarFrameAnimation();
-      }
     } else {
       radarMap.removeLayer(radarRainLayer);
       stopRadarFrameAnimation();
@@ -649,9 +767,6 @@ function openRadar() {
   initializeRadarMap();
   if (radarMap) window.setTimeout(() => radarMap.invalidateSize(), 100);
   if (!radarRainLayer) void loadRainViewerFrames();
-  else if (radarLayerMode === "rain" && !window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
-    startRadarFrameAnimation();
-  }
   if (!radarForecastData) {
     radarStatus.textContent = "Clique no mapa para consultar um local ou use «Usar minha localização».";
   }
@@ -796,18 +911,31 @@ form.addEventListener("submit", async (event) => {
       body: JSON.stringify({ cidade: cityInput.value.trim(), data: dateInput.value }),
     });
     const result = await response.json();
-    if (!response.ok) throw new Error(result.erro || "Não foi possível consultar a previsão.");
+    if (!response.ok) {
+      const error = new Error(result.erro || "Não foi possível consultar a previsão.");
+      error.rateLimit = result.rate_limit;
+      throw error;
+    }
     showForecast(result);
   } catch (error) {
+    const retry = error.rateLimit?.proxima_consulta_disponivel;
+    const remaining = retry ? formatTimeUntil(retry) : null;
     message.textContent = error instanceof TypeError
       ? "Não foi possível conectar ao servidor. Confira sua conexão e tente novamente."
-      : error.message;
+      : `${error.message}${remaining
+        ? ` Próxima consulta disponível após ${remaining.duration}, por volta de ${remaining.time}.`
+        : error.rateLimit?.tentativa_manual_necessaria
+          ? " A API não informou quando liberar; use a opção de tentativa manual no diagnóstico."
+          : ""}`;
     emptyState.hidden = false;
   } finally {
     searchButton.disabled = false;
     buttonLabel.textContent = "Consultar previsão";
+    await refreshQuotaStatus();
   }
 });
+
+void refreshQuotaStatus();
 
 if ("serviceWorker" in navigator) {
   window.addEventListener("load", () => {

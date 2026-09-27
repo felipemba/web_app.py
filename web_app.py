@@ -1,26 +1,139 @@
 import argparse
 import json
+import math
 import mimetypes
 import os
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from math import ceil
 from pathlib import Path
-from urllib.parse import unquote, urlsplit
+from urllib.parse import parse_qs, unquote, urlsplit
 
 from weather import (
+    CityNotFoundError,
     ForecastUnavailableError,
     WeatherError,
+    WeatherUpstreamError,
     consultar_previsao,
+    consultar_previsao_ponto,
+    consultar_tempo_atual,
+    liberar_tentativa_manual,
+    obter_diagnostico,
     validar_data_previsao,
 )
 
 
 WEB_DIR = Path(__file__).resolve().parent / "web"
 MAX_REQUEST_BYTES = 8192
+WEATHER_POINTS = (
+    {"name": "Nova York", "lat": 40.7128, "lon": -74.0060, "country": "EUA"},
+    {"name": "São Paulo", "lat": -23.5505, "lon": -46.6333, "country": "Brasil"},
+    {"name": "Londres", "lat": 51.5074, "lon": -0.1278, "country": "Reino Unido"},
+    {"name": "Dubai", "lat": 25.2048, "lon": 55.2708, "country": "Emirados"},
+    {"name": "Tóquio", "lat": 35.6762, "lon": 139.6503, "country": "Japão"},
+    {"name": "Sydney", "lat": -33.8688, "lon": 151.2093, "country": "Austrália"},
+    {"name": "Cidade do Cabo", "lat": -33.9249, "lon": 18.4241, "country": "África do Sul"},
+    {"name": "Buenos Aires", "lat": -34.6037, "lon": -58.3816, "country": "Argentina"},
+)
+
+
+def _previsao_mapa(ponto):
+    data = consultar_tempo_atual(ponto["lat"], ponto["lon"])
+    current = data.get("current")
+    if not isinstance(current, dict) or not all(
+        isinstance(current.get(key), (int, float))
+        for key in (
+            "temperature_2m",
+            "precipitation",
+            "wind_speed_10m",
+            "weather_code",
+        )
+    ):
+        raise WeatherError("o serviço não retornou condições atuais válidas.")
+    return {
+        **ponto,
+        "current": {
+            "temperature_2m": current["temperature_2m"],
+            "precipitation": current["precipitation"],
+            "wind_speed_10m": current["wind_speed_10m"],
+            "weather_code": current["weather_code"],
+        },
+    }
 
 
 class WeatherRequestHandler(BaseHTTPRequestHandler):
     def do_GET(self):
-        caminho = urlsplit(self.path).path
+        requisicao = urlsplit(self.path)
+        caminho = requisicao.path
+        if caminho == "/api/diagnostico":
+            self._responder_json(200, obter_diagnostico())
+            return
+
+        if caminho == "/api/radar":
+            parametros = parse_qs(requisicao.query)
+            try:
+                latitude = float(parametros["latitude"][0])
+                longitude = float(parametros["longitude"][0])
+                if (
+                    not math.isfinite(latitude)
+                    or not math.isfinite(longitude)
+                    or not -90 <= latitude <= 90
+                    or not -180 <= longitude <= 180
+                ):
+                    raise ValueError("coordenadas fora dos limites geográficos.")
+                previsao = consultar_previsao_ponto(latitude, longitude)
+            except (KeyError, ValueError, IndexError) as erro:
+                self._responder_json(400, {"erro": "Informe coordenadas válidas."})
+                return
+            except WeatherUpstreamError as erro:
+                self._responder_erro_meteorologico(erro)
+                return
+            except WeatherError as erro:
+                self._responder_json(502, {"erro": str(erro)})
+                return
+            self._responder_json(200, previsao)
+            return
+
+        if caminho == "/api/mapa":
+            with ThreadPoolExecutor(max_workers=4) as executor:
+                requisicoes = [
+                    executor.submit(_previsao_mapa, ponto)
+                    for ponto in WEATHER_POINTS
+                ]
+                resultados = []
+                primeiro_erro = None
+                for ponto, requisicao in zip(WEATHER_POINTS, requisicoes):
+                    try:
+                        resultados.append(requisicao.result())
+                    except WeatherUpstreamError as erro:
+                        if primeiro_erro is None or erro.status == 429:
+                            primeiro_erro = erro
+                        resultados.append({**ponto, "erro": str(erro)})
+                    except (WeatherError, ValueError) as erro:
+                        resultados.append({**ponto, "erro": str(erro)})
+            if primeiro_erro is not None:
+                self._responder_erro_meteorologico(primeiro_erro)
+                return
+            if all("erro" in resultado for resultado in resultados):
+                if primeiro_erro is not None:
+                    self._responder_erro_meteorologico(primeiro_erro)
+                    return
+                self._responder_json(
+                    502,
+                    {
+                        "erro": "Não foi possível carregar nenhuma condição do mapa.",
+                        "pontos": resultados,
+                    },
+                )
+                return
+            self._responder_json(200, resultados)
+            return
+
+        if caminho.startswith("/api/"):
+            self._responder_json(404, {"erro": "Rota não encontrada."})
+            return
+
         if caminho == "/":
             caminho = "/index.html"
 
@@ -45,7 +158,23 @@ class WeatherRequestHandler(BaseHTTPRequestHandler):
         self.wfile.write(conteudo)
 
     def do_POST(self):
-        if urlsplit(self.path).path != "/api/previsao":
+        caminho = urlsplit(self.path).path
+        if caminho == "/api/tentar-novamente":
+            liberada = liberar_tentativa_manual()
+            self._responder_json(
+                200,
+                {
+                    "liberada": liberada,
+                    "mensagem": (
+                        "Uma nova consulta manual foi liberada."
+                        if liberada
+                        else "Não há bloqueio manual ativo."
+                    ),
+                },
+            )
+            return
+
+        if caminho != "/api/previsao":
             self._responder_json(404, {"erro": "Rota não encontrada."})
             return
 
@@ -97,19 +226,51 @@ class WeatherRequestHandler(BaseHTTPRequestHandler):
         except ForecastUnavailableError as erro:
             self._responder_json(422, {"erro": str(erro)})
             return
+        except CityNotFoundError as erro:
+            self._responder_json(404, {"erro": str(erro)})
+            return
+        except WeatherUpstreamError as erro:
+            self._responder_erro_meteorologico(erro)
+            return
         except WeatherError as erro:
             self._responder_json(502, {"erro": str(erro)})
             return
 
         self._responder_json(200, previsao)
 
-    def _responder_json(self, status, dados):
+    def _responder_erro_meteorologico(self, erro):
+        dados = {"erro": str(erro), "http_status": erro.status}
+        if erro.status == 429:
+            diagnostico = obter_diagnostico()
+            dados["rate_limit"] = {
+                "proxima_consulta_disponivel": (
+                    erro.retry_at.isoformat() if erro.retry_at else None
+                ),
+                "tentativa_manual_necessaria": (
+                    diagnostico["tentativa_manual_necessaria"]
+                    if erro.retry_at is None
+                    else False
+                ),
+                "headers": erro.headers,
+            }
+        headers = {}
+        if erro.status == 429 and erro.retry_at is not None:
+            segundos = max(
+                0,
+                ceil((erro.retry_at - datetime.now(timezone.utc)).total_seconds()),
+            )
+            headers["Retry-After"] = str(segundos)
+        self._responder_json(erro.status, dados, headers=headers)
+
+    def _responder_json(self, status, dados, headers=None):
         conteudo = json.dumps(dados, ensure_ascii=False).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(conteudo)))
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Cache-Control", "no-store")
+        for nome, valor in (headers or {}).items():
+            self.send_header(nome, valor)
         self.end_headers()
         self.wfile.write(conteudo)
 

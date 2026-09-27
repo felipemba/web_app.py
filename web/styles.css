@@ -409,6 +409,25 @@ h1 span { color: #638096; font-weight: 450; }
 .search-button > span:last-child { font-size: 18px; }
 .form-message { min-height: 18px; margin: 10px 3px 0; color: #a04637; font-size: 13px; text-align: center; }
 .form-message:empty { min-height: 18px; }
+.quota-card {
+  margin: 14px 0 20px;
+  padding: 18px;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  background: rgb(255 255 255 / 92%);
+  box-shadow: 0 9px 28px rgb(16 38 62 / 5%);
+}
+.quota-heading h2 { margin: 0; color: var(--navy); font-size: 19px; }
+.quota-heading .eyebrow { margin-bottom: 5px; }
+.quota-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 13px; margin: 15px 0 0; }
+.quota-grid > div { min-width: 0; padding: 11px 12px; border: 1px solid #edf1f4; border-radius: 11px; background: #fbfcfd; }
+.quota-grid dt { color: #718293; font-size: 11px; }
+.quota-grid dd { margin: 5px 0 0; color: var(--ink); font-size: 13px; font-weight: 750; overflow-wrap: anywhere; }
+.quota-note { margin: 12px 1px 0; color: #718293; font-size: 11px; line-height: 1.55; }
+.quota-source { margin: 7px 1px 0; color: #718293; font-size: 11px; line-height: 1.5; }
+.quota-source a { color: #245881; }
+.quota-retry-button { min-height: 38px; margin-top: 12px; padding: 0 13px; border: 1px solid #bd6b45; border-radius: 9px; color: #813f27; background: #fff4ed; cursor: pointer; font-size: 12px; font-weight: 750; }
+.quota-retry-button:disabled { cursor: wait; opacity: .65; }
 .empty-state { padding: 18px 12px 10px; color: #728494; text-align: center; }
 .empty-illustration { position: relative; width: 95px; height: 76px; margin: 0 auto 15px; color: #7598ac; }
 .empty-illustration span { display: block; font-size: 72px; line-height: 1; }
@@ -477,6 +496,9 @@ h1 span { color: #638096; font-weight: 450; }
   .input-wrap input, .input-wrap input[type="date"] { font-size: 16px; }
   .search-button { justify-content: space-between; padding-inline: 16px; }
   .form-message { margin-top: 8px; }
+  .quota-card { margin-top: 11px; padding: 14px; }
+  .quota-grid { gap: 8px; }
+  .quota-grid > div { padding: 9px; }
   .empty-state { padding-top: 14px; }
   .forecast { margin-top: 8px; }
   .forecast-heading { padding-top: 12px; }

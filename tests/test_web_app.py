@@ -1,9 +1,13 @@
 import json
 import threading
+import time
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date, timedelta
+from email.message import Message
 from http.server import ThreadingHTTPServer
-from urllib.error import HTTPError
+from io import BytesIO
+from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 from unittest.mock import patch
 
@@ -240,6 +244,243 @@ class WeatherWebAppTests(unittest.TestCase):
 
         self.assertEqual(status, 415)
         self.assertIn("JSON", json.loads(response_body)["erro"])
+
+    def test_reports_quota_without_inventing_remaining_or_reset(self):
+        status, _, response_body = self.request("/api/diagnostico")
+
+        self.assertEqual(status, 200)
+        diagnosis = json.loads(response_body)
+        self.assertEqual(diagnosis["api"], "Open-Meteo")
+        self.assertIsNone(diagnosis["consultas_restantes_informadas"])
+        self.assertIsNone(diagnosis["horario_de_renovacao"])
+        self.assertFalse(diagnosis["contagem_observada_global"])
+
+    def test_rate_limit_response_preserves_status_and_retry_after(self):
+        retry_at = weather.datetime.now(weather.timezone.utc) + timedelta(minutes=2)
+        error = weather.WeatherRateLimitError(
+            "Limite de consultas atingido.",
+            retry_at=retry_at,
+            headers={"retry-after": "120"},
+        )
+        body = json.dumps(
+            {"cidade": "Recife", "data": date.today().isoformat()}
+        ).encode("utf-8")
+
+        with patch("web_app.consultar_previsao", side_effect=error):
+            status, headers, response_body = self.request(
+                "/api/previsao",
+                method="POST",
+                data=body,
+            )
+
+        self.assertEqual(status, 429)
+        self.assertTrue(int(headers["Retry-After"]) > 0)
+        response = json.loads(response_body)
+        self.assertEqual(response["http_status"], 429)
+        self.assertEqual(response["rate_limit"]["headers"]["retry-after"], "120")
+
+    def test_upstream_http_errors_preserve_their_status(self):
+        data = json.dumps(
+            {"cidade": "Recife", "data": date.today().isoformat()}
+        ).encode("utf-8")
+
+        for upstream_status in (400, 401, 403, 404, 408, 500, 502, 503, 504):
+            with self.subTest(status=upstream_status):
+                error = weather.WeatherUpstreamError(
+                    f"HTTP {upstream_status}",
+                    status=upstream_status,
+                )
+                with patch("web_app.consultar_previsao", side_effect=error):
+                    status, _, response_body = self.request(
+                        "/api/previsao",
+                        method="POST",
+                        data=data,
+                    )
+                self.assertEqual(status, upstream_status)
+                self.assertEqual(
+                    json.loads(response_body)["http_status"],
+                    upstream_status,
+                )
+
+    @patch("web_app.consultar_previsao")
+    def test_unknown_city_returns_not_found(self, consultar):
+        consultar.side_effect = weather.CityNotFoundError(
+            "nenhuma cidade encontrada."
+        )
+        body = json.dumps(
+            {"cidade": "Cidade inexistente", "data": date.today().isoformat()}
+        ).encode("utf-8")
+
+        status, _, response_body = self.request(
+            "/api/previsao",
+            method="POST",
+            data=body,
+        )
+
+        self.assertEqual(status, 404)
+        self.assertIn("cidade", json.loads(response_body)["erro"])
+
+    def test_weather_429_opens_circuit_and_manual_release_does_not_retry(self):
+        with weather._rate_limit_lock:
+            previous = dict(weather._rate_limit)
+            weather._rate_limit.update(
+                blocked_until=None,
+                manual_retry_required=False,
+                headers={},
+            )
+        self.addCleanup(
+            lambda: weather._rate_limit.update(previous)
+        )
+        response_headers = Message()
+        response_headers["Retry-After"] = "120"
+        error = HTTPError(
+            weather.FORECAST_URL,
+            429,
+            "Too Many Requests",
+            response_headers,
+            BytesIO(b'{"reason":"rate limit"}'),
+        )
+
+        with patch("weather.urlopen", side_effect=error) as upstream:
+            with self.assertRaises(weather.WeatherRateLimitError) as caught:
+                weather._get_json(weather.FORECAST_URL, {})
+            self.assertGreater(caught.exception.retry_at, weather.datetime.now(weather.timezone.utc))
+            with self.assertRaises(weather.WeatherRateLimitError):
+                weather._get_json(weather.FORECAST_URL, {})
+            self.assertEqual(upstream.call_count, 1)
+
+    def test_weather_timeout_and_connection_failure_have_gateway_statuses(self):
+        for failure, expected_status in (
+            (TimeoutError("timed out"), 504),
+            (URLError(TimeoutError("timed out")), 504),
+            (URLError("network unavailable"), 503),
+        ):
+            with self.subTest(status=expected_status, failure=type(failure).__name__):
+                with patch("weather.urlopen", side_effect=failure):
+                    with self.assertRaises(weather.WeatherUpstreamError) as caught:
+                        weather._get_json(weather.FORECAST_URL, {})
+                self.assertEqual(caught.exception.status, expected_status)
+
+    def test_manual_release_only_clears_unknown_retry_state(self):
+        with weather._rate_limit_lock:
+            previous = dict(weather._rate_limit)
+            weather._rate_limit.update(
+                blocked_until=None,
+                manual_retry_required=True,
+                headers={},
+            )
+        self.addCleanup(
+            lambda: weather._rate_limit.update(previous)
+        )
+
+        status, _, response_body = self.request(
+            "/api/tentar-novamente",
+            method="POST",
+        )
+
+        self.assertEqual(status, 200)
+        self.assertTrue(json.loads(response_body)["liberada"])
+        with weather._rate_limit_lock:
+            self.assertFalse(weather._rate_limit["manual_retry_required"])
+
+    def test_map_weather_is_served_through_backend(self):
+        def current_weather(latitude, longitude):
+            return {
+                "current": {
+                    "temperature_2m": 20,
+                    "precipitation": 0,
+                    "wind_speed_10m": 5,
+                    "weather_code": 1,
+                }
+            }
+
+        with patch(
+            "web_app.consultar_tempo_atual",
+            side_effect=current_weather,
+        ) as consultar:
+            status, _, response_body = self.request("/api/mapa")
+
+        self.assertEqual(status, 200)
+        points = json.loads(response_body)
+        self.assertEqual(len(points), len(web_app.WEATHER_POINTS))
+        self.assertEqual(points[0]["current"]["weather_code"], 1)
+        self.assertEqual(consultar.call_count, len(web_app.WEATHER_POINTS))
+
+    def test_radar_forecast_is_proxied_and_rejects_invalid_coordinates(self):
+        forecast = {"hourly": {"time": []}, "daily": {"time": []}}
+        with patch(
+            "web_app.consultar_previsao_ponto",
+            return_value=forecast,
+        ) as consultar:
+            status, _, response_body = self.request(
+                "/api/radar?latitude=-8.05&longitude=-34.9"
+            )
+            self.assertEqual(status, 200)
+            self.assertEqual(json.loads(response_body), forecast)
+            consultar.assert_called_once_with(-8.05, -34.9)
+
+            status, _, _ = self.request("/api/radar?latitude=91&longitude=0")
+        self.assertEqual(status, 400)
+        consultar.assert_called_once()
+
+    def test_cache_coalesces_simultaneous_requests(self):
+        calls = []
+        key = ("test-single-flight", time.monotonic())
+
+        def load():
+            calls.append(True)
+            time.sleep(0.03)
+            return {"value": [1]}
+
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            results = list(
+                executor.map(
+                    lambda _: weather._cache_result(key, 60, load),
+                    range(8),
+                )
+            )
+
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(results, [{"value": [1]}] * 8)
+        results[0]["value"].append(2)
+        self.assertEqual(weather._cache_result(key, 60, load), {"value": [1]})
+
+    def test_identical_city_and_date_reuses_forecast_cache(self):
+        data = date.today()
+        with patch(
+            "weather._consultar_previsao_sem_cache",
+            return_value={"cidade": "Recife"},
+        ) as consultar:
+            self.assertEqual(
+                weather.consultar_previsao("Cache test city", data),
+                {"cidade": "Recife"},
+            )
+            self.assertEqual(
+                weather.consultar_previsao("Cache test city", data),
+                {"cidade": "Recife"},
+            )
+
+        consultar.assert_called_once()
+
+    def test_different_cities_and_dates_use_distinct_forecast_cache_entries(self):
+        today = date.today()
+        first_date = today + timedelta(days=1)
+        second_date = today + timedelta(days=2)
+        with patch(
+            "weather._consultar_previsao_sem_cache",
+            side_effect=lambda city, forecast_date, choice: {
+                "cidade": city,
+                "data": forecast_date.isoformat(),
+            },
+        ) as consultar:
+            first = weather.consultar_previsao("Cache test city A", first_date)
+            second = weather.consultar_previsao("Cache test city A", second_date)
+            third = weather.consultar_previsao("Cache test city B", first_date)
+
+        self.assertEqual(first["data"], first_date.isoformat())
+        self.assertEqual(second["data"], second_date.isoformat())
+        self.assertEqual(third["cidade"], "Cache test city B")
+        self.assertEqual(consultar.call_count, 3)
 
 
 if __name__ == "__main__":

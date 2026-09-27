@@ -98,7 +98,7 @@
             </div>
             <div class="map-badges">
               <span>Open-Meteo</span>
-              <span>Atualização a cada 2 min</span>
+              <span>Cache do servidor: até 10 min</span>
             </div>
           </div>
           <div id="weather-map" aria-label="Mapa das condições meteorológicas atuais em cidades do mundo"></div>
@@ -134,6 +134,43 @@
         </form>
 
         <p class="form-message" id="form-message" role="status" aria-live="polite"></p>
+
+        <section class="quota-card" id="weather-quota" aria-labelledby="quota-title">
+          <div class="quota-heading">
+            <div>
+              <p class="eyebrow">USO DO SERVIÇO</p>
+              <h2 id="quota-title">Consultas meteorológicas</h2>
+            </div>
+          </div>
+          <dl class="quota-grid">
+            <div>
+              <dt>Consultas disponíveis hoje</dt>
+              <dd id="quota-available">Não informado pela API</dd>
+            </div>
+            <div>
+              <dt>Consultas utilizadas</dt>
+              <dd id="quota-used">Verificando...</dd>
+            </div>
+            <div>
+              <dt>Limite diário oficial</dt>
+              <dd id="quota-limit">Verificando...</dd>
+            </div>
+            <div>
+              <dt>Próxima renovação</dt>
+              <dd id="quota-renewal">Não informado pela API</dd>
+            </div>
+          </dl>
+          <p class="quota-note" id="quota-note" role="status" aria-live="polite">
+            O saldo diário e o horário de renovação dependem das informações fornecidas pela API.
+          </p>
+          <p class="quota-source">
+            Limites publicados para a API gratuita não comercial:
+            <a href="https://open-meteo.com/en/terms" target="_blank" rel="noreferrer">termos oficiais da Open-Meteo</a>.
+          </p>
+          <button class="quota-retry-button" id="quota-retry" type="button" hidden>
+            Liberar uma tentativa manual
+          </button>
+        </section>
 
         <section class="empty-state" id="empty-state" aria-label="Como consultar a previsão">
           <div class="empty-illustration" aria-hidden="true"><span>☁</span><i>✦</i></div>

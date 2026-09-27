@@ -1,4 +1,4 @@
-const CACHE_NAME = "clima-de-hoje-v5";
+const CACHE_NAME = "clima-de-hoje-v6";
 const APP_SHELL = [
   "/",
   "/index.html",
