@@ -52,7 +52,6 @@ let radarFrameTimer = null;
 let radarRequestId = 0;
 let radarLastFocusedElement = null;
 
-const RADAR_FORECAST_URL = "https://api.open-meteo.com/v1/forecast";
 const RAINVIEWER_API_URL = "https://api.rainviewer.com/public/weather-maps.json";
 
 function getMapModeColor(mode, value) {
@@ -164,10 +163,14 @@ async function loadGlobalWeather() {
   mapStatus.textContent = "Atualizando condições meteorológicas...";
   const results = await Promise.allSettled(
     weatherPoints.map(async (point) => {
-      const url = `https://api.open-meteo.com/v1/forecast?latitude=${point.lat}&longitude=${point.lon}&current=temperature_2m,precipitation,wind_speed_10m,weather_code&timezone=auto&forecast_days=1`;
-      const response = await fetch(url, { cache: "no-store" });
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      const data = await response.json();
+      const response = await fetch("/api/tempo/atual", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ latitude: point.lat, longitude: point.lon }),
+      });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.erro || `HTTP ${response.status}`);
+      const data = result;
       const current = data.current;
       if (!current || ![
         current.temperature_2m,
@@ -212,13 +215,16 @@ async function loadGlobalWeather() {
 
   const failures = results.filter((result) => result.status === "rejected").length;
   const availablePoints = weatherPoints.filter((point) => point.current).length;
+  const firstFailure = results.find((result) => result.status === "rejected");
+  const failureMessage = firstFailure?.reason?.message;
   renderWeatherMap();
   if (failures === weatherPoints.length) {
     mapStatus.textContent = availablePoints
-      ? "Falha na atualização. Exibindo as últimas leituras disponíveis."
-      : "Não foi possível carregar os dados meteorológicos. Verifique sua conexão e tente novamente.";
+      ? `Falha na atualização${failureMessage ? `: ${failureMessage}` : ""}. Exibindo as últimas leituras disponíveis.`
+      : failureMessage
+        || "Não foi possível carregar os dados meteorológicos. Verifique sua conexão e tente novamente.";
   } else if (failures > 0) {
-    mapStatus.textContent = `Dados parciais: ${failures} de ${weatherPoints.length} cidades sem atualização. Leituras anteriores foram preservadas.`;
+    mapStatus.textContent = `Dados parciais: ${failures} de ${weatherPoints.length} cidades sem atualização.${failureMessage ? ` ${failureMessage}` : ""} Leituras anteriores foram preservadas.`;
   } else {
     mapStatus.textContent = `Dados atualizados às ${new Date().toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" })}.`;
   }
@@ -233,7 +239,7 @@ function initializeMapWeather() {
   }
   const refresh = async () => {
     await loadGlobalWeather();
-    setTimeout(refresh, 120000);
+    setTimeout(refresh, 600000);
   };
   refresh();
 }
@@ -565,18 +571,19 @@ async function loadRadarForecast(latitude, longitude) {
   radarAlertList.textContent = "Consultando as próximas 24 horas...";
   stopRadarAnimation();
   try {
-    const parameters = new URLSearchParams({
-      latitude: String(latitude),
-      longitude: String(longitude),
-      daily: "weather_code,temperature_2m_min,temperature_2m_max",
-      hourly: "temperature_2m,precipitation,wind_speed_10m,wind_direction_10m,wind_gusts_10m,weather_code",
-      current: "temperature_2m,precipitation,wind_speed_10m,weather_code",
-      forecast_days: "7",
-      timezone: "auto",
+    const response = await fetch("/api/tempo/radar", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ latitude, longitude }),
     });
-    const response = await fetch(`${RADAR_FORECAST_URL}?${parameters}`, { cache: "no-store" });
-    if (!response.ok) throw new Error(`serviço meteorológico indisponível (HTTP ${response.status}).`);
-    const data = await response.json();
+    const resultado = await response.json();
+    if (!response.ok) {
+      throw new Error(
+        resultado.erro
+        || `serviço meteorológico indisponível (HTTP ${response.status}).`,
+      );
+    }
+    const data = resultado;
     const hourlyVariables = [
       "time",
       "temperature_2m",

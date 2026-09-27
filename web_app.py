@@ -1,5 +1,6 @@
 import argparse
 import json
+import math
 import mimetypes
 import os
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -9,7 +10,10 @@ from urllib.parse import unquote, urlsplit
 from weather import (
     ForecastUnavailableError,
     WeatherError,
+    WeatherRateLimitError,
     consultar_previsao,
+    consultar_previsao_ponto,
+    consultar_tempo_atual,
     validar_data_previsao,
 )
 
@@ -45,7 +49,13 @@ class WeatherRequestHandler(BaseHTTPRequestHandler):
         self.wfile.write(conteudo)
 
     def do_POST(self):
-        if urlsplit(self.path).path != "/api/previsao":
+        rota = urlsplit(self.path).path
+        rotas_meteorologicas = {
+            "/api/previsao",
+            "/api/tempo/atual",
+            "/api/tempo/radar",
+        }
+        if rota not in rotas_meteorologicas:
             self._responder_json(404, {"erro": "Rota não encontrada."})
             return
 
@@ -74,6 +84,29 @@ class WeatherRequestHandler(BaseHTTPRequestHandler):
             self._responder_json(400, {"erro": "Informe uma cidade e uma data."})
             return
 
+        if rota in ("/api/tempo/atual", "/api/tempo/radar"):
+            coordenadas = self._validar_coordenadas(dados)
+            if coordenadas is None:
+                self._responder_json(
+                    400,
+                    {"erro": "Informe latitude e longitude válidas."},
+                )
+                return
+            try:
+                if rota == "/api/tempo/atual":
+                    resposta = consultar_tempo_atual(*coordenadas)
+                else:
+                    resposta = consultar_previsao_ponto(*coordenadas)
+            except WeatherRateLimitError as erro:
+                self._responder_json(429, {"erro": str(erro)})
+                return
+            except WeatherError as erro:
+                self._responder_json(502, {"erro": str(erro)})
+                return
+
+            self._responder_json(200, resposta)
+            return
+
         cidade = dados.get("cidade")
         data_texto = dados.get("data")
         if not isinstance(cidade, str) or not cidade.strip():
@@ -97,11 +130,31 @@ class WeatherRequestHandler(BaseHTTPRequestHandler):
         except ForecastUnavailableError as erro:
             self._responder_json(422, {"erro": str(erro)})
             return
+        except WeatherRateLimitError as erro:
+            self._responder_json(429, {"erro": str(erro)})
+            return
         except WeatherError as erro:
             self._responder_json(502, {"erro": str(erro)})
             return
 
         self._responder_json(200, previsao)
+
+    @staticmethod
+    def _validar_coordenadas(dados):
+        latitude = dados.get("latitude")
+        longitude = dados.get("longitude")
+        if (
+            isinstance(latitude, bool)
+            or isinstance(longitude, bool)
+            or not isinstance(latitude, (int, float))
+            or not isinstance(longitude, (int, float))
+            or not math.isfinite(latitude)
+            or not math.isfinite(longitude)
+            or not -90 <= latitude <= 90
+            or not -180 <= longitude <= 180
+        ):
+            return None
+        return latitude, longitude
 
     def _responder_json(self, status, dados):
         conteudo = json.dumps(dados, ensure_ascii=False).encode("utf-8")
