@@ -1,5 +1,6 @@
 import io
 import json
+import socket
 import threading
 import time
 import unittest
@@ -56,15 +57,33 @@ class WeatherWebAppTests(unittest.TestCase):
     def setUp(self):
         with weather._cache_lock:
             weather._cache.clear()
+            weather._stale_cache.clear()
             weather._in_flight.clear()
         with weather._rate_limit_lock:
             weather._rate_limit.update(
                 blocked_until=None,
                 manual_retry_required=False,
+                manual_retry_after=None,
+                unknown_429_count=0,
+                transient_blocked_until=None,
+                consecutive_failures=0,
                 headers={},
             )
         with weather._usage_lock:
             weather._upstream_requests = 0
+            weather._metrics.update(
+                cache_hits=0,
+                cache_misses=0,
+                duplicate_requests_blocked=0,
+                stale_cache_hits=0,
+                upstream_errors={},
+                timeouts=0,
+                connection_errors=0,
+                overload_rejections=0,
+                upstream_duration_ms_total=0,
+                upstream_duration_ms_max=0,
+            )
+        weather.limpar_estado_cache_da_requisicao()
 
     def test_serves_app_shell_and_manifest(self):
         status, headers, body = self.request("/")
@@ -164,16 +183,16 @@ class WeatherWebAppTests(unittest.TestCase):
 
     @patch("web_app.consultar_tempo_atual")
     def test_weather_endpoint_rejects_invalid_coordinates(self, consultar):
-        body = json.dumps({"latitude": 91, "longitude": 0}).encode()
-
-        status, _, response_body = self.request(
-            "/api/tempo/atual",
-            method="POST",
-            data=body,
-        )
-
-        self.assertEqual(status, 400)
-        self.assertIn("latitude e longitude", json.loads(response_body)["erro"])
+        for latitude in (91, 10**1000):
+            with self.subTest(latitude_digits=len(str(latitude))):
+                body = json.dumps({"latitude": latitude, "longitude": 0}).encode()
+                status, _, response_body = self.request(
+                    "/api/tempo/atual",
+                    method="POST",
+                    data=body,
+                )
+                self.assertEqual(status, 400)
+                self.assertIn("latitude e longitude", json.loads(response_body)["erro"])
         consultar.assert_not_called()
 
     @patch("web_app.consultar_previsao")
@@ -290,7 +309,10 @@ class WeatherWebAppTests(unittest.TestCase):
         self.assertNotIn("forecast_days", parametros)
 
     def test_caches_weather_api_responses(self):
-        resposta = io.BytesIO(b'{"current":{"temperature_2m":20}}')
+        resposta = io.BytesIO(
+            b'{"current":{"temperature_2m":20,"precipitation":0,'
+            b'"wind_speed_10m":5,"weather_code":1}}'
+        )
 
         with patch("weather.urlopen", return_value=resposta) as abrir_url:
             primeira = weather.consultar_tempo_atual(-23.55, -46.63)
@@ -302,7 +324,14 @@ class WeatherWebAppTests(unittest.TestCase):
     def test_deduplicates_simultaneous_identical_requests(self):
         requisicao_iniciada = threading.Event()
         liberar_resposta = threading.Event()
-        resposta = {"current": {"temperature_2m": 20}}
+        resposta = {
+            "current": {
+                "temperature_2m": 20,
+                "precipitation": 0,
+                "wind_speed_10m": 5,
+                "weather_code": 1,
+            }
+        }
 
         def buscar_resposta(_):
             requisicao_iniciada.set()
@@ -529,6 +558,35 @@ class WeatherWebAppTests(unittest.TestCase):
                 weather._get_json(weather.FORECAST_URL, {})
             self.assertEqual(upstream.call_count, 1)
 
+    def test_429_without_retry_after_delays_manual_release(self):
+        error = HTTPError(
+            weather.FORECAST_URL,
+            429,
+            "Too Many Requests",
+            Message(),
+            BytesIO(b""),
+        )
+        with patch("weather.urlopen", side_effect=error) as upstream:
+            with self.assertRaises(weather.WeatherRateLimitError) as caught:
+                weather._solicitar_json("https://example.invalid/first")
+            self.assertGreater(
+                caught.exception.retry_at,
+                weather.datetime.now(weather.timezone.utc),
+            )
+            self.assertTrue(caught.exception.manual_retry_required)
+            with self.assertRaises(weather.WeatherRateLimitError):
+                weather.liberar_tentativa_manual()
+            with self.assertRaises(weather.WeatherRateLimitError):
+                weather._solicitar_json("https://example.invalid/second")
+            upstream.assert_called_once()
+
+        with weather._rate_limit_lock:
+            weather._rate_limit["manual_retry_after"] = (
+                weather.datetime.now(weather.timezone.utc) - timedelta(seconds=1)
+            )
+        self.assertTrue(weather.liberar_tentativa_manual())
+        self.assertEqual(upstream.call_count, 1)
+
     def test_weather_timeout_and_connection_failure_have_gateway_statuses(self):
         for failure, expected_status in (
             (TimeoutError("timed out"), 504),
@@ -536,6 +594,11 @@ class WeatherWebAppTests(unittest.TestCase):
             (URLError("network unavailable"), 503),
         ):
             with self.subTest(status=expected_status, failure=type(failure).__name__):
+                with weather._rate_limit_lock:
+                    weather._rate_limit.update(
+                        transient_blocked_until=None,
+                        consecutive_failures=0,
+                    )
                 with patch("weather.urlopen", side_effect=failure):
                     with self.assertRaises(weather.WeatherUpstreamError) as caught:
                         weather._get_json(weather.FORECAST_URL, {})
@@ -649,6 +712,310 @@ class WeatherWebAppTests(unittest.TestCase):
         self.assertEqual(results, [{"value": [1]}] * 8)
         results[0]["value"].append(2)
         self.assertEqual(weather._cache_result(key, 60, load), {"value": [1]})
+
+    def test_expired_cache_falls_back_to_recent_data_on_upstream_failure(self):
+        key = ("stale-fallback", time.monotonic())
+        weather._cache_result(
+            key,
+            1,
+            lambda: {"value": "recent"},
+            stale_ttl_seconds=30,
+        )
+        with weather._cache_lock:
+            weather._cache[key] = (time.monotonic() - 1, {"value": "recent"})
+        weather.limpar_estado_cache_da_requisicao()
+
+        result = weather._cache_result(
+            key,
+            1,
+            lambda: (_ for _ in ()).throw(
+                weather.WeatherUpstreamError("temporarily unavailable", status=503)
+            ),
+            stale_ttl_seconds=30,
+        )
+
+        self.assertEqual(result, {"value": "recent"})
+        self.assertTrue(weather.requisicao_usou_cache_antigo())
+        self.assertEqual(weather.obter_diagnostico()["metricas"]["stale_cache_hits"], 1)
+
+    def test_expired_stale_cache_is_not_returned(self):
+        key = ("expired-stale-fallback", time.monotonic())
+        with weather._cache_lock:
+            weather._stale_cache[key] = (
+                time.monotonic() - 1,
+                {"value": "too old"},
+            )
+
+        with self.assertRaises(weather.WeatherUpstreamError):
+            weather._cache_result(
+                key,
+                1,
+                lambda: (_ for _ in ()).throw(
+                    weather.WeatherUpstreamError("unavailable", status=503)
+                ),
+                stale_ttl_seconds=30,
+            )
+
+        with weather._cache_lock:
+            self.assertNotIn(key, weather._stale_cache)
+
+    def test_oversized_cache_values_are_not_retained(self):
+        key = ("oversized-cache", time.monotonic())
+        value = {"data": "x" * weather.MAX_CACHE_ENTRY_BYTES}
+
+        self.assertEqual(weather._cache_result(key, 60, lambda: value), value)
+        with weather._cache_lock:
+            self.assertNotIn(key, weather._cache)
+            self.assertNotIn(key, weather._stale_cache)
+
+    def test_upstream_requests_are_globally_limited_without_real_network(self):
+        active = 0
+        maximum_active = 0
+        lock = threading.Lock()
+
+        class SlowResponse:
+            headers = {}
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_):
+                nonlocal active
+                with lock:
+                    active -= 1
+
+            def read(self, _size):
+                time.sleep(0.04)
+                return b'{"ok":true}'
+
+        def fake_urlopen(*_args, **_kwargs):
+            nonlocal active, maximum_active
+            with lock:
+                active += 1
+                maximum_active = max(maximum_active, active)
+            return SlowResponse()
+
+        with patch("weather.urlopen", side_effect=fake_urlopen):
+            with ThreadPoolExecutor(max_workers=8) as executor:
+                results = list(
+                    executor.map(
+                        lambda index: weather._solicitar_json(
+                            f"https://example.invalid/{index}"
+                        ),
+                        range(8),
+                    )
+                )
+
+        self.assertEqual(results, [{"ok": True}] * 8)
+        self.assertLessEqual(maximum_active, weather.UPSTREAM_MAX_CONCURRENT)
+        self.assertGreater(maximum_active, 1)
+
+    def test_transient_server_error_opens_progressive_backoff_without_retry(self):
+        error = HTTPError(
+            "https://api.open-meteo.com/v1/forecast",
+            503,
+            "Service Unavailable",
+            Message(),
+            BytesIO(b""),
+        )
+        with patch("weather.urlopen", side_effect=error) as upstream:
+            with self.assertRaises(weather.WeatherUpstreamError) as first:
+                weather._solicitar_json("https://example.invalid/first")
+            with self.assertRaises(weather.WeatherUpstreamError) as second:
+                weather._solicitar_json("https://example.invalid/second")
+
+        self.assertEqual(first.exception.status, 503)
+        self.assertEqual(second.exception.status, 503)
+        self.assertIsNotNone(second.exception.retry_at)
+        upstream.assert_called_once()
+
+    def test_upstream_500_502_503_504_open_circuit_without_retry(self):
+        for status in (500, 502, 503, 504):
+            with self.subTest(status=status):
+                with weather._rate_limit_lock:
+                    weather._rate_limit.update(
+                        transient_blocked_until=None,
+                        consecutive_failures=0,
+                    )
+                error = HTTPError(
+                    "https://api.open-meteo.com/v1/forecast",
+                    status,
+                    "Upstream failure",
+                    Message(),
+                    BytesIO(b""),
+                )
+                with patch("weather.urlopen", side_effect=error) as upstream:
+                    with self.assertRaises(weather.WeatherUpstreamError) as caught:
+                        weather._solicitar_json(
+                            f"https://example.invalid/{status}"
+                        )
+
+                self.assertEqual(caught.exception.status, status)
+                self.assertIsNotNone(caught.exception.retry_at)
+                upstream.assert_called_once()
+
+    def test_repeated_transient_failures_increase_backoff(self):
+        errors = [
+            HTTPError(
+                "https://api.open-meteo.com/v1/forecast",
+                503,
+                "Service Unavailable",
+                Message(),
+                BytesIO(b""),
+            )
+            for _ in range(2)
+        ]
+        with patch("weather.urlopen", side_effect=errors):
+            with self.assertRaises(weather.WeatherUpstreamError) as first:
+                weather._solicitar_json("https://example.invalid/first")
+            with weather._rate_limit_lock:
+                weather._rate_limit["transient_blocked_until"] = (
+                    weather.datetime.now(weather.timezone.utc) - timedelta(seconds=1)
+                )
+            with self.assertRaises(weather.WeatherUpstreamError) as second:
+                weather._solicitar_json("https://example.invalid/second")
+
+        first_wait = (first.exception.retry_at - weather.datetime.now(weather.timezone.utc)).total_seconds()
+        second_wait = (second.exception.retry_at - weather.datetime.now(weather.timezone.utc)).total_seconds()
+        self.assertGreater(first_wait, 1)
+        self.assertGreater(second_wait, first_wait)
+
+    def test_provider_low_remaining_header_extends_cache_ttl(self):
+        class QuotaResponse(io.BytesIO):
+            headers = Message()
+
+        response = QuotaResponse(b'{"current":{"temperature_2m":20}}')
+        response.headers["RateLimit-Limit"] = "100"
+        response.headers["RateLimit-Remaining"] = "5"
+        started = time.monotonic()
+        with patch("weather.urlopen", return_value=response):
+            weather._get_json(weather.FORECAST_URL, {"latitude": 12})
+
+        key = ("api", f"{weather.FORECAST_URL}?latitude=12")
+        with weather._cache_lock:
+            remaining_ttl = weather._cache[key][0] - started
+        diagnosis = weather.obter_diagnostico()
+
+        self.assertGreaterEqual(remaining_ttl, weather.FORECAST_CACHE_SECONDS * 2.9)
+        self.assertTrue(diagnosis["limite_proximo_informado"])
+        self.assertEqual(
+            diagnosis["ttl_cache_multiplicador"],
+            weather.NEAR_LIMIT_CACHE_MULTIPLIER,
+        )
+
+    def test_invalid_upstream_json_is_reported_and_tracked(self):
+        for response in (b"not-json", b'{"current":NaN}'):
+            with self.subTest(response=response):
+                with weather._rate_limit_lock:
+                    weather._rate_limit.update(
+                        transient_blocked_until=None,
+                        consecutive_failures=0,
+                    )
+                with patch("weather.urlopen", return_value=io.BytesIO(response)):
+                    with self.assertRaises(weather.WeatherUpstreamError) as caught:
+                        weather._solicitar_json(
+                            f"https://example.invalid/invalid-{len(response)}"
+                        )
+                self.assertEqual(caught.exception.status, 502)
+        self.assertEqual(
+            weather.obter_diagnostico()["metricas"]["upstream_errors"]["502"],
+            2,
+        )
+
+    def test_stale_radar_response_is_identified_to_the_browser(self):
+        key = ("radar", -8.05, -34.9)
+        cached = {"daily": {"time": []}, "hourly": {"time": []}}
+        with weather._cache_lock:
+            weather._stale_cache[key] = (time.monotonic() + 60, cached)
+
+        with patch(
+            "weather._get_json",
+            side_effect=weather.WeatherRateLimitError("limite atingido"),
+        ):
+            status, headers, body = self.request(
+                "/api/radar?latitude=-8.05&longitude=-34.9"
+            )
+
+        self.assertEqual(status, 200)
+        self.assertEqual(headers["X-Weather-Cache"], "stale")
+        self.assertEqual(json.loads(body), cached)
+
+    def test_malformed_forecast_uses_valid_stale_radar_data(self):
+        key = ("radar", -8.05, -34.9)
+        cached = {
+            "daily": {
+                "time": ["2026-09-27"],
+                "weather_code": [1],
+                "temperature_2m_min": [20],
+                "temperature_2m_max": [30],
+            },
+            "hourly": {
+                "time": ["2026-09-27T12:00"],
+                "temperature_2m": [25],
+                "precipitation": [0],
+                "wind_speed_10m": [5],
+                "wind_direction_10m": [180],
+                "wind_gusts_10m": [8],
+                "weather_code": [1],
+            },
+        }
+        with weather._cache_lock:
+            weather._stale_cache[key] = (time.monotonic() + 60, cached)
+
+        with patch(
+            "weather._solicitar_json",
+            return_value={"hourly": {"time": []}, "daily": {"time": []}},
+        ):
+            result = weather.consultar_previsao_ponto(-8.05, -34.9)
+
+        self.assertEqual(result, cached)
+        self.assertTrue(weather.requisicao_usou_cache_antigo())
+        with weather._cache_lock:
+            self.assertFalse(any(key_part[0] == "api" for key_part in weather._cache))
+
+    def test_map_keeps_successful_points_when_another_location_fails(self):
+        def current_weather(latitude, longitude):
+            if latitude == web_app.WEATHER_POINTS[0]["lat"]:
+                raise weather.WeatherUpstreamError("temporary failure", status=503)
+            return {
+                "current": {
+                    "temperature_2m": 20,
+                    "precipitation": 0,
+                    "wind_speed_10m": 5,
+                    "weather_code": 1,
+                }
+            }
+
+        with patch("web_app.consultar_tempo_atual", side_effect=current_weather):
+            status, _, body = self.request("/api/mapa")
+
+        points = json.loads(body)
+        self.assertEqual(status, 200)
+        self.assertTrue(points[0].get("erro"))
+        self.assertIn("current", points[1])
+
+    def test_http_server_rejects_connections_over_its_limit(self):
+        server = web_app.BoundedThreadingHTTPServer(
+            ("127.0.0.1", 0),
+            web_app.WeatherRequestHandler,
+            max_connections=1,
+        )
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        slot_held = server._request_slots.acquire(blocking=False)
+        try:
+            with socket.create_connection(server.server_address, timeout=3) as client:
+                client.settimeout(3)
+                client.sendall(b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n")
+                response = client.recv(256)
+        finally:
+            if slot_held:
+                server._request_slots.release()
+            server.shutdown()
+            server.server_close()
+            thread.join()
+
+        self.assertIn(b"503 Service Unavailable", response)
 
     def test_expired_cache_entries_are_removed_during_reads(self):
         expired_key = ("expired-entry", time.monotonic())

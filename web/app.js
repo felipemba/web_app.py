@@ -44,6 +44,7 @@ let weatherMapInstance = null;
 let weatherLayers = [];
 let currentMapMode = "temperature";
 let globalWeatherLoading = false;
+let forecastRequestInFlight = false;
 let radarMap = null;
 let radarRainLayer = null;
 let radarRainRequestStarted = false;
@@ -111,14 +112,38 @@ async function refreshQuotaStatus() {
       "O contador interno registra tentativas iniciadas desde que esta instância subiu; pode incluir falhas e não representa o consumo confirmado nem o uso de outros servidores/clientes.",
       "O horário de renovação só aparece quando informado pelos headers da API.",
     ];
+    const metrics = data.metricas || {};
+    parts.push(
+      `Cache: ${metrics.cache_hits || 0} acertos, ${metrics.cache_misses || 0} faltas, `
+      + `${metrics.duplicate_requests_blocked || 0} duplicatas bloqueadas e `
+      + `${metrics.stale_cache_hits || 0} respostas antigas reaproveitadas. `
+      + `Falhas upstream: ${JSON.stringify(metrics.upstream_errors || {})}; `
+      + `${metrics.timeouts || 0} timeouts, ${metrics.connection_errors || 0} falhas de conexão, `
+      + `${metrics.overload_rejections || 0} rejeições por sobrecarga.`,
+    );
     const retry = data.proxima_consulta_disponivel
       ? formatTimeUntil(data.proxima_consulta_disponivel)
       : null;
     if (retry) {
       parts.push(`Novas consultas suspensas até aproximadamente ${retry.time} (${retry.duration}).`);
     } else if (data.tentativa_manual_necessaria) {
-      parts.push("A API não informou quando liberar. Nenhuma chamada será repetida automaticamente; libere uma tentativa manual quando desejar.");
+      const manualRetry = data.proxima_tentativa_manual
+        ? formatTimeUntil(data.proxima_tentativa_manual)
+        : null;
+      parts.push(manualRetry
+        ? `A API não informou quando liberar. Nenhuma chamada será repetida automaticamente; a proteção local libera uma tentativa manual após ${manualRetry.duration}, por volta de ${manualRetry.time}.`
+        : "A API não informou quando liberar. Nenhuma chamada será repetida automaticamente; libere uma tentativa manual quando desejar.");
     }
+    const transientRetry = data.proxima_tentativa_transitoria
+      ? formatTimeUntil(data.proxima_tentativa_transitoria)
+      : null;
+    if (transientRetry) {
+      parts.push(`Consultas temporariamente pausadas após falhas; nova tentativa permitida por volta de ${transientRetry.time} (${transientRetry.duration}).`);
+    }
+    if (data.limite_proximo_informado) {
+      parts.push(`A API informou que o limite está próximo; o TTL do cache foi ampliado em ${data.ttl_cache_multiplicador}x.`);
+    }
+    parts.push(`Concorrência máxima com a API: ${data.concorrencia_upstream_maxima}; timeout: ${data.timeouts_upstream}s.`);
     if (data.headers_de_limite && Object.keys(data.headers_de_limite).length > 0) {
       parts.push("Headers de limite recebidos: " + Object.entries(data.headers_de_limite)
         .map(([name, value]) => `${name}: ${value}`)
@@ -136,14 +161,21 @@ quotaRetryButton.addEventListener("click", async () => {
   try {
     const response = await fetch("/api/tentar-novamente", { method: "POST" });
     const result = await response.json();
-    if (!response.ok) throw new Error(result.erro || "Não foi possível liberar a tentativa.");
+    if (!response.ok) {
+      const error = new Error(result.erro || "Não foi possível liberar a tentativa.");
+      error.retryAt = result.retry_at;
+      throw error;
+    }
     await refreshQuotaStatus();
     if (result.liberada) {
       quotaNote.textContent += " " + result.mensagem
         + " Nenhuma consulta meteorológica foi feita automaticamente.";
     }
   } catch (error) {
-    quotaNote.textContent = error.message;
+    const retry = error.retryAt ? formatTimeUntil(error.retryAt) : null;
+    quotaNote.textContent = retry
+      ? `${error.message} Tente novamente após ${retry.duration}, por volta de ${retry.time}.`
+      : error.message;
   } finally {
     quotaRetryButton.disabled = false;
   }
@@ -263,6 +295,7 @@ async function loadGlobalWeather() {
     if (!response.ok) {
       const error = new Error(results.erro || "Não foi possível atualizar o mapa.");
       error.rateLimit = results.rate_limit;
+      error.retryAt = results.retry_at;
       throw error;
     }
     const conditionMap = {
@@ -286,6 +319,7 @@ async function loadGlobalWeather() {
       99: "trovoada com granizo intenso",
     };
     const failures = results.filter((result) => result.erro).length;
+    const staleCache = response.headers.get("X-Weather-Cache") === "stale";
     results.forEach((result) => {
       const point = weatherPoints.find((item) => item.name === result.name);
       if (!point || result.erro) return;
@@ -303,25 +337,25 @@ async function loadGlobalWeather() {
     if (failures > 0) {
       const availablePoints = weatherPoints.filter((point) => point.current).length;
       mapStatus.textContent = availablePoints
-        ? `Dados parciais: ${failures} de ${weatherPoints.length} cidades sem atualização. Leituras anteriores foram preservadas.`
+        ? `Dados parciais: ${failures} de ${weatherPoints.length} cidades sem atualização. Leituras anteriores foram preservadas.${staleCache ? " Dados recentes do cache podem estar sendo exibidos." : ""}`
         : "Não foi possível carregar os dados meteorológicos.";
     } else {
-      mapStatus.textContent = "Dados consultados. Respostas repetidas são reutilizadas pelo cache do servidor por até 10 minutos.";
+      mapStatus.textContent = staleCache
+        ? "Serviço meteorológico instável; mostrando dados recentes do cache."
+        : "Dados consultados. Respostas repetidas são reutilizadas pelo cache do servidor por até 10 minutos.";
     }
   } catch (error) {
     mapStatus.textContent = error.rateLimit
       ? `${error.message} Consulte o diagnóstico de limite abaixo.`
       : `${error.message} Leituras anteriores foram preservadas.`;
-    if (error.rateLimit) {
-      const retry = error.rateLimit.proxima_consulta_disponivel;
-      if (retry) {
-        const remaining = formatTimeUntil(retry);
-        if (remaining) {
-          mapStatus.textContent += ` Próxima consulta disponível após ${remaining.duration}, por volta de ${remaining.time}.`;
-        }
-      } else {
-        mapStatus.textContent += " A API não informou quando liberar; use a opção de tentativa manual no diagnóstico.";
+    const retry = error.rateLimit?.proxima_consulta_disponivel || error.retryAt;
+    if (retry) {
+      const remaining = formatTimeUntil(retry);
+      if (remaining) {
+        mapStatus.textContent += ` Próxima consulta disponível após ${remaining.duration}, por volta de ${remaining.time}.`;
       }
+    } else if (error.rateLimit?.tentativa_manual_necessaria) {
+      mapStatus.textContent += " A API não informou quando liberar; aguarde o intervalo de proteção local e use a tentativa manual no diagnóstico.";
     }
   } finally {
     globalWeatherLoading = false;
@@ -687,6 +721,7 @@ async function loadRadarForecast(latitude, longitude) {
     if (!response.ok) {
       const error = new Error(data.erro || `serviço meteorológico indisponível (HTTP ${response.status}).`);
       error.rateLimit = data.rate_limit;
+      error.retryAt = data.retry_at;
       throw error;
     }
     const hourlyVariables = [
@@ -716,7 +751,9 @@ async function loadRadarForecast(latitude, longitude) {
 
     radarForecastData = { ...data, latitude, longitude };
     radarLocationSummary.textContent = `${formatRadarCoordinates(latitude, longitude)} · ${data.timezone || "fuso horário local"}`;
-    radarStatus.textContent = `Previsão para sete dias em ${formatRadarCoordinates(latitude, longitude)}. Clique noutro ponto para atualizar.`;
+    radarStatus.textContent = response.headers.get("X-Weather-Cache") === "stale"
+      ? "Serviço meteorológico instável; mostrando uma previsão recente do cache."
+      : `Previsão para sete dias em ${formatRadarCoordinates(latitude, longitude)}. Clique noutro ponto para atualizar.`;
     renderRadarWeek(data);
     renderRadarAlerts(data);
     selectRadarDay(data.daily.time[0]);
@@ -724,7 +761,7 @@ async function loadRadarForecast(latitude, longitude) {
     if (requestId !== radarRequestId) return;
     radarStatus.textContent = error.message;
     if (error.rateLimit) {
-      const retry = error.rateLimit.proxima_consulta_disponivel;
+      const retry = error.rateLimit.proxima_consulta_disponivel || error.retryAt;
       const remaining = retry ? formatTimeUntil(retry) : null;
       radarStatus.textContent += remaining
         ? ` Próxima consulta disponível após ${remaining.duration}, por volta de ${remaining.time}.`
@@ -899,6 +936,8 @@ function showForecast(data) {
 
 form.addEventListener("submit", async (event) => {
   event.preventDefault();
+  if (forecastRequestInFlight) return;
+  forecastRequestInFlight = true;
   message.textContent = "";
   forecast.hidden = true;
   emptyState.hidden = true;
@@ -915,11 +954,15 @@ form.addEventListener("submit", async (event) => {
     if (!response.ok) {
       const error = new Error(result.erro || "Não foi possível consultar a previsão.");
       error.rateLimit = result.rate_limit;
+      error.retryAt = result.retry_at;
       throw error;
     }
     showForecast(result);
+    if (response.headers.get("X-Weather-Cache") === "stale") {
+      message.textContent = "Serviço meteorológico instável; mostrando dados recentes do cache.";
+    }
   } catch (error) {
-    const retry = error.rateLimit?.proxima_consulta_disponivel;
+    const retry = error.rateLimit?.proxima_consulta_disponivel || error.retryAt;
     const remaining = retry ? formatTimeUntil(retry) : null;
     message.textContent = error instanceof TypeError
       ? "Não foi possível conectar ao servidor. Confira sua conexão e tente novamente."
@@ -930,6 +973,7 @@ form.addEventListener("submit", async (event) => {
           : ""}`;
     emptyState.hidden = false;
   } finally {
+    forecastRequestInFlight = false;
     searchButton.disabled = false;
     buttonLabel.textContent = "Consultar previsão";
     await refreshQuotaStatus();

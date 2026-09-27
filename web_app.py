@@ -1,5 +1,6 @@
 import argparse
 import json
+import logging
 import math
 import mimetypes
 import os
@@ -22,13 +23,18 @@ from weather import (
     consultar_previsao_ponto,
     consultar_tempo_atual,
     liberar_tentativa_manual,
+    limpar_estado_cache_da_requisicao,
     obter_diagnostico,
+    registrar_rejeicao_sobrecarga,
+    requisicao_usou_cache_antigo,
     validar_data_previsao,
 )
 
 
 WEB_DIR = Path(__file__).resolve().parent / "web"
 MAX_REQUEST_BYTES = 8192
+MAX_HTTP_CONNECTIONS = 32
+_logger = logging.getLogger("web_app")
 MAP_EXECUTOR = ThreadPoolExecutor(
     max_workers=4,
     thread_name_prefix="weather-map",
@@ -48,6 +54,7 @@ WEATHER_POINTS = (
 
 
 def _previsao_mapa(ponto):
+    limpar_estado_cache_da_requisicao()
     data = consultar_tempo_atual(ponto["lat"], ponto["lon"])
     current = data.get("current")
     if not isinstance(current, dict) or not all(
@@ -60,7 +67,7 @@ def _previsao_mapa(ponto):
         )
     ):
         raise WeatherError("o serviço não retornou condições atuais válidas.")
-    return {
+    resultado = {
         **ponto,
         "current": {
             "temperature_2m": current["temperature_2m"],
@@ -69,6 +76,9 @@ def _previsao_mapa(ponto):
             "weather_code": current["weather_code"],
         },
     }
+    if requisicao_usou_cache_antigo():
+        resultado["_cache_antigo"] = True
+    return resultado
 
 
 def _obter_previsoes_mapa():
@@ -112,7 +122,11 @@ def _obter_previsoes_mapa():
 
 
 class WeatherRequestHandler(BaseHTTPRequestHandler):
+    def log_request(self, code="-", size="-"):
+        _logger.info("Weather HTTP request completed: status=%s", code)
+
     def do_GET(self):
+        limpar_estado_cache_da_requisicao()
         requisicao = urlsplit(self.path)
         caminho = requisicao.path
         if caminho == "/api/diagnostico":
@@ -146,9 +160,11 @@ class WeatherRequestHandler(BaseHTTPRequestHandler):
 
         if caminho == "/api/mapa":
             resultados, primeiro_erro = _obter_previsoes_mapa()
-            if primeiro_erro is not None:
-                self._responder_erro_meteorologico(primeiro_erro)
-                return
+            cache_antigo = any(
+                resultado.pop("_cache_antigo", False)
+                for resultado in resultados
+            )
+            headers = {"X-Weather-Cache": "stale"} if cache_antigo else None
             if all("erro" in resultado for resultado in resultados):
                 if primeiro_erro is not None:
                     self._responder_erro_meteorologico(primeiro_erro)
@@ -161,7 +177,7 @@ class WeatherRequestHandler(BaseHTTPRequestHandler):
                     },
                 )
                 return
-            self._responder_json(200, resultados)
+            self._responder_json(200, resultados, headers=headers)
             return
 
         if caminho.startswith("/api/"):
@@ -192,9 +208,14 @@ class WeatherRequestHandler(BaseHTTPRequestHandler):
         self.wfile.write(conteudo)
 
     def do_POST(self):
+        limpar_estado_cache_da_requisicao()
         caminho = urlsplit(self.path).path
         if caminho == "/api/tentar-novamente":
-            liberada = liberar_tentativa_manual()
+            try:
+                liberada = liberar_tentativa_manual()
+            except WeatherRateLimitError as erro:
+                self._responder_erro_meteorologico(erro)
+                return
             self._responder_json(
                 200,
                 {
@@ -302,28 +323,23 @@ class WeatherRequestHandler(BaseHTTPRequestHandler):
 
     def _responder_erro_meteorologico(self, erro):
         dados = {"erro": str(erro), "http_status": erro.status}
+        retry_at = getattr(erro, "retry_at", None)
+        if retry_at is not None:
+            dados["retry_at"] = retry_at.isoformat()
         if erro.status == 429:
-            retry_at = (
-                erro.retry_at
-                if isinstance(erro, WeatherRateLimitError)
-                else None
-            )
+            retry_at = erro.retry_at if isinstance(erro, WeatherRateLimitError) else None
             dados["rate_limit"] = {
                 "proxima_consulta_disponivel": (
                     retry_at.isoformat() if retry_at else None
                 ),
-                "tentativa_manual_necessaria": retry_at is None,
+                "tentativa_manual_necessaria": erro.manual_retry_required,
                 "headers": erro.headers,
             }
         headers = {}
-        if (
-            erro.status == 429
-            and isinstance(erro, WeatherRateLimitError)
-            and erro.retry_at is not None
-        ):
+        if retry_at is not None:
             segundos = max(
                 0,
-                ceil((erro.retry_at - datetime.now(timezone.utc)).total_seconds()),
+                ceil((retry_at - datetime.now(timezone.utc)).total_seconds()),
             )
             headers["Retry-After"] = str(segundos)
         self._responder_json(erro.status, dados, headers=headers)
@@ -337,10 +353,10 @@ class WeatherRequestHandler(BaseHTTPRequestHandler):
             or isinstance(longitude, bool)
             or not isinstance(latitude, (int, float))
             or not isinstance(longitude, (int, float))
-            or not math.isfinite(latitude)
-            or not math.isfinite(longitude)
             or not -90 <= latitude <= 90
             or not -180 <= longitude <= 180
+            or not math.isfinite(latitude)
+            or not math.isfinite(longitude)
         ):
             return None
         return latitude, longitude
@@ -352,10 +368,49 @@ class WeatherRequestHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(conteudo)))
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Cache-Control", "no-store")
+        if requisicao_usou_cache_antigo():
+            self.send_header("X-Weather-Cache", "stale")
         for nome, valor in (headers or {}).items():
             self.send_header(nome, valor)
         self.end_headers()
         self.wfile.write(conteudo)
+
+class BoundedThreadingHTTPServer(ThreadingHTTPServer):
+    request_queue_size = MAX_HTTP_CONNECTIONS
+    daemon_threads = True
+
+    def __init__(self, server_address, request_handler, max_connections=MAX_HTTP_CONNECTIONS):
+        self._request_slots = threading.BoundedSemaphore(max_connections)
+        super().__init__(server_address, request_handler)
+
+    def process_request(self, request, client_address):
+        if not self._request_slots.acquire(blocking=False):
+            registrar_rejeicao_sobrecarga()
+            _logger.warning("Weather HTTP connection limit reached")
+            try:
+                request.settimeout(0.5)
+                request.sendall(
+                    b"HTTP/1.1 503 Service Unavailable\r\n"
+                    b"Content-Length: 0\r\n"
+                    b"Connection: close\r\n"
+                    b"Retry-After: 2\r\n\r\n"
+                )
+            except OSError:
+                pass
+            finally:
+                self.shutdown_request(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except Exception:
+            self._request_slots.release()
+            raise
+
+    def process_request_thread(self, request, client_address):
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._request_slots.release()
 
 
 def main():
@@ -378,7 +433,7 @@ def main():
     )
     argumentos = parser.parse_args()
 
-    servidor = ThreadingHTTPServer(
+    servidor = BoundedThreadingHTTPServer(
         (argumentos.host, argumentos.port),
         WeatherRequestHandler,
     )
