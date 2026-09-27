@@ -1,3 +1,4 @@
+import io
 import json
 import threading
 import time
@@ -52,6 +53,19 @@ class WeatherWebAppTests(unittest.TestCase):
             with response:
                 return response.code, response.headers, response.read()
 
+    def setUp(self):
+        with weather._cache_lock:
+            weather._cache.clear()
+            weather._in_flight.clear()
+        with weather._rate_limit_lock:
+            weather._rate_limit.update(
+                blocked_until=None,
+                manual_retry_required=False,
+                headers={},
+            )
+        with weather._usage_lock:
+            weather._upstream_requests = 0
+
     def test_serves_app_shell_and_manifest(self):
         status, headers, body = self.request("/")
         self.assertEqual(status, 200)
@@ -96,6 +110,71 @@ class WeatherWebAppTests(unittest.TestCase):
         self.assertEqual(json.loads(response_body), previsao)
         self.assertEqual(headers["Cache-Control"], "no-store")
         consultar.assert_called_once()
+
+    @patch("web_app.consultar_tempo_atual")
+    def test_current_weather_endpoint_proxies_valid_coordinates(self, consultar):
+        consulta = {"current": {"temperature_2m": 20}}
+        consultar.return_value = consulta
+        body = json.dumps({"latitude": -23.55, "longitude": -46.63}).encode()
+
+        status, _, response_body = self.request(
+            "/api/tempo/atual",
+            method="POST",
+            data=body,
+        )
+
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(response_body), consulta)
+        consultar.assert_called_once_with(-23.55, -46.63)
+
+    @patch("web_app.consultar_previsao_ponto")
+    def test_radar_endpoint_returns_friendly_rate_limit_error(self, consultar):
+        consultar.side_effect = weather.WeatherRateLimitError(
+            "o serviço meteorológico está temporariamente sobrecarregado."
+        )
+        body = json.dumps({"latitude": 40.7, "longitude": -74.0}).encode()
+
+        status, _, response_body = self.request(
+            "/api/tempo/radar",
+            method="POST",
+            data=body,
+        )
+
+        self.assertEqual(status, 429)
+        self.assertIn("temporariamente sobrecarregado", json.loads(response_body)["erro"])
+        consultar.assert_called_once_with(40.7, -74.0)
+
+    @patch("web_app.consultar_previsao")
+    def test_city_forecast_returns_rate_limit_status(self, consultar):
+        consultar.side_effect = weather.WeatherRateLimitError(
+            "o serviço meteorológico está temporariamente sobrecarregado."
+        )
+        data = date.today().isoformat()
+        body = json.dumps({"cidade": "Recife", "data": data}).encode()
+
+        status, _, response_body = self.request(
+            "/api/previsao",
+            method="POST",
+            data=body,
+        )
+
+        self.assertEqual(status, 429)
+        self.assertIn("temporariamente sobrecarregado", json.loads(response_body)["erro"])
+        consultar.assert_called_once()
+
+    @patch("web_app.consultar_tempo_atual")
+    def test_weather_endpoint_rejects_invalid_coordinates(self, consultar):
+        body = json.dumps({"latitude": 91, "longitude": 0}).encode()
+
+        status, _, response_body = self.request(
+            "/api/tempo/atual",
+            method="POST",
+            data=body,
+        )
+
+        self.assertEqual(status, 400)
+        self.assertIn("latitude e longitude", json.loads(response_body)["erro"])
+        consultar.assert_not_called()
 
     @patch("web_app.consultar_previsao")
     def test_accepts_a_future_date_within_forecast_range(self, consultar):
@@ -209,6 +288,107 @@ class WeatherWebAppTests(unittest.TestCase):
         self.assertEqual(parametros["start_date"], data_futura.isoformat())
         self.assertEqual(parametros["end_date"], data_futura.isoformat())
         self.assertNotIn("forecast_days", parametros)
+
+    def test_caches_weather_api_responses(self):
+        resposta = io.BytesIO(b'{"current":{"temperature_2m":20}}')
+
+        with patch("weather.urlopen", return_value=resposta) as abrir_url:
+            primeira = weather.consultar_tempo_atual(-23.55, -46.63)
+            segunda = weather.consultar_tempo_atual(-23.55, -46.63)
+
+        self.assertEqual(primeira, segunda)
+        abrir_url.assert_called_once()
+
+    def test_deduplicates_simultaneous_identical_requests(self):
+        requisicao_iniciada = threading.Event()
+        liberar_resposta = threading.Event()
+        resposta = {"current": {"temperature_2m": 20}}
+
+        def buscar_resposta(_):
+            requisicao_iniciada.set()
+            self.assertTrue(liberar_resposta.wait(timeout=3))
+            return resposta
+
+        with patch("weather._solicitar_json", side_effect=buscar_resposta) as buscar:
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                primeira = executor.submit(
+                    weather.consultar_tempo_atual,
+                    -23.55,
+                    -46.63,
+                )
+                self.assertTrue(requisicao_iniciada.wait(timeout=3))
+                segunda = executor.submit(
+                    weather.consultar_tempo_atual,
+                    -23.55,
+                    -46.63,
+                )
+                liberar_resposta.set()
+                self.assertEqual(primeira.result(timeout=3), resposta)
+                self.assertEqual(segunda.result(timeout=3), resposta)
+
+        buscar.assert_called_once()
+
+    def test_rate_limited_request_uses_retry_after_without_automatic_retry(self):
+        headers = Message()
+        headers["Retry-After"] = "0"
+        rate_limit = HTTPError(
+            "https://api.open-meteo.com/v1/forecast",
+            429,
+            "Too Many Requests",
+            headers,
+            None,
+        )
+        with (
+            patch("weather.urlopen", side_effect=rate_limit) as abrir_url,
+            patch("weather.time.sleep") as aguardar,
+            self.assertRaises(weather.WeatherRateLimitError),
+        ):
+            weather.consultar_tempo_atual(-23.55, -46.63)
+
+        abrir_url.assert_called_once()
+        aguardar.assert_not_called()
+
+    def test_stops_after_the_first_http_429_response(self):
+        headers = Message()
+        headers["Retry-After"] = "0"
+        rate_limit = HTTPError(
+            "https://api.open-meteo.com/v1/forecast",
+            429,
+            "Too Many Requests",
+            headers,
+            None,
+        )
+
+        with (
+            patch("weather.urlopen", side_effect=rate_limit) as abrir_url,
+            patch("weather.time.sleep"),
+            self.assertRaises(weather.WeatherRateLimitError),
+        ):
+            weather.consultar_tempo_atual(-23.55, -46.63)
+
+        abrir_url.assert_called_once()
+
+    def test_rate_limit_pauses_requests_for_other_locations(self):
+        headers = Message()
+        headers["Retry-After"] = "60"
+        rate_limit = HTTPError(
+            "https://api.open-meteo.com/v1/forecast",
+            429,
+            "Too Many Requests",
+            headers,
+            None,
+        )
+
+        with (
+            patch("weather.urlopen", side_effect=rate_limit) as abrir_url,
+            self.assertRaises(weather.WeatherRateLimitError),
+        ):
+            weather.consultar_tempo_atual(-23.55, -46.63)
+
+        with self.assertRaises(weather.WeatherRateLimitError):
+            weather.consultar_tempo_atual(40.7, -74.0)
+
+        abrir_url.assert_called_once()
 
     def test_accepts_dates_up_to_two_years_ahead(self):
         hoje = date(2026, 2, 28)

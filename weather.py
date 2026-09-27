@@ -317,17 +317,17 @@ def validar_data_previsao(texto, hoje=None):
     return data
 
 
-def _get_json(url, parametros):
-    if url == FORECAST_URL and os.environ.get("OPEN_METEO_API_KEY"):
-        parametros = {**parametros, "apikey": os.environ["OPEN_METEO_API_KEY"]}
+def _solicitar_json(url_completo):
     requisicao = Request(
-        f"{url}?{urlencode(parametros)}",
+        url_completo,
         headers={"User-Agent": "CalculadoraPrevisaoTempo/1.0"},
     )
     try:
         _iniciar_solicitacao_upstream()
         with urlopen(requisicao, timeout=TIMEOUT_SECONDS) as resposta:
-            rate_headers = _response_rate_headers(resposta.headers)
+            rate_headers = _response_rate_headers(
+                getattr(resposta, "headers", {}) or {}
+            )
             dados = json.loads(resposta.read().decode("utf-8"))
         with _rate_limit_lock:
             if (
@@ -336,7 +336,7 @@ def _get_json(url, parametros):
             ):
                 _rate_limit["headers"] = rate_headers
     except HTTPError as erro:
-        headers = _response_rate_headers(erro.headers)
+        headers = _response_rate_headers(erro.headers or {})
         if erro.code == 429:
             retry_at = _retry_time(erro.headers)
             with _rate_limit_lock:
@@ -348,6 +348,7 @@ def _get_json(url, parametros):
             message = "Limite de consultas da API meteorológica atingido."
             if retry_at is None:
                 message += " A API não informou quando será possível consultar novamente."
+            erro.close()
             raise WeatherRateLimitError(message, retry_at, headers) from erro
         with _rate_limit_lock:
             if (
@@ -355,6 +356,7 @@ def _get_json(url, parametros):
                 and not _rate_limit["manual_retry_required"]
             ):
                 _rate_limit["headers"] = headers
+        erro.close()
         raise WeatherUpstreamError(
             f"serviço meteorológico indisponível (HTTP {erro.code}).",
             status=erro.code,
@@ -386,6 +388,22 @@ def _get_json(url, parametros):
             status=400,
         )
     return dados
+
+
+def _get_json(url, parametros):
+    if url == FORECAST_URL and os.environ.get("OPEN_METEO_API_KEY"):
+        parametros = {**parametros, "apikey": os.environ["OPEN_METEO_API_KEY"]}
+    url_completo = f"{url}?{urlencode(parametros)}"
+    ttl_seconds = (
+        GEOCODING_CACHE_SECONDS
+        if url == GEOCODING_URL
+        else FORECAST_CACHE_SECONDS
+    )
+    return _cache_result(
+        ("api", url_completo),
+        ttl_seconds,
+        lambda: _solicitar_json(url_completo),
+    )
 
 
 def _buscar_cidade(nome, escolha=None):
@@ -443,6 +461,39 @@ def _formatar_medida(valor, unidade):
     if valor is None:
         return "Indisponível"
     return f"{valor:g} {unidade}"
+
+
+def consultar_tempo_atual(latitude, longitude):
+    return _get_json(
+        FORECAST_URL,
+        {
+            "latitude": latitude,
+            "longitude": longitude,
+            "current": (
+                "temperature_2m,precipitation,wind_speed_10m,weather_code"
+            ),
+            "timezone": "auto",
+            "forecast_days": 1,
+        },
+    )
+
+
+def consultar_previsao_ponto(latitude, longitude):
+    return _get_json(
+        FORECAST_URL,
+        {
+            "latitude": latitude,
+            "longitude": longitude,
+            "daily": "weather_code,temperature_2m_min,temperature_2m_max",
+            "hourly": (
+                "temperature_2m,precipitation,wind_speed_10m,"
+                "wind_direction_10m,wind_gusts_10m,weather_code"
+            ),
+            "current": "temperature_2m,precipitation,wind_speed_10m,weather_code",
+            "forecast_days": 7,
+            "timezone": "auto",
+        },
+    )
 
 
 def consultar_previsao(nome_cidade, data, escolha_cidade=None):

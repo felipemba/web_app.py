@@ -60,6 +60,7 @@ let radarFrameTimer = null;
 let radarRequestId = 0;
 let radarRequestController = null;
 let radarLastFocusedElement = null;
+
 const RAINVIEWER_API_URL = "https://api.rainviewer.com/public/weather-maps.json";
 
 function formatTimeUntil(timestamp) {

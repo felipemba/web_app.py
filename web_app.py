@@ -13,6 +13,7 @@ from urllib.parse import parse_qs, unquote, urlsplit
 from weather import (
     CityNotFoundError,
     ForecastUnavailableError,
+    WeatherRateLimitError,
     WeatherError,
     WeatherUpstreamError,
     consultar_previsao,
@@ -174,7 +175,12 @@ class WeatherRequestHandler(BaseHTTPRequestHandler):
             )
             return
 
-        if caminho != "/api/previsao":
+        rotas_meteorologicas = {
+            "/api/previsao",
+            "/api/tempo/atual",
+            "/api/tempo/radar",
+        }
+        if caminho not in rotas_meteorologicas:
             self._responder_json(404, {"erro": "Rota não encontrada."})
             return
 
@@ -201,6 +207,29 @@ class WeatherRequestHandler(BaseHTTPRequestHandler):
 
         if not isinstance(dados, dict):
             self._responder_json(400, {"erro": "Informe uma cidade e uma data."})
+            return
+
+        if caminho in ("/api/tempo/atual", "/api/tempo/radar"):
+            coordenadas = self._validar_coordenadas(dados)
+            if coordenadas is None:
+                self._responder_json(
+                    400,
+                    {"erro": "Informe latitude e longitude válidas."},
+                )
+                return
+            try:
+                if caminho == "/api/tempo/atual":
+                    resposta = consultar_tempo_atual(*coordenadas)
+                else:
+                    resposta = consultar_previsao_ponto(*coordenadas)
+            except WeatherUpstreamError as erro:
+                self._responder_erro_meteorologico(erro)
+                return
+            except WeatherError as erro:
+                self._responder_json(502, {"erro": str(erro)})
+                return
+
+            self._responder_json(200, resposta)
             return
 
         cidade = dados.get("cidade")
@@ -241,26 +270,47 @@ class WeatherRequestHandler(BaseHTTPRequestHandler):
     def _responder_erro_meteorologico(self, erro):
         dados = {"erro": str(erro), "http_status": erro.status}
         if erro.status == 429:
-            diagnostico = obter_diagnostico()
+            retry_at = (
+                erro.retry_at
+                if isinstance(erro, WeatherRateLimitError)
+                else None
+            )
             dados["rate_limit"] = {
                 "proxima_consulta_disponivel": (
-                    erro.retry_at.isoformat() if erro.retry_at else None
+                    retry_at.isoformat() if retry_at else None
                 ),
-                "tentativa_manual_necessaria": (
-                    diagnostico["tentativa_manual_necessaria"]
-                    if erro.retry_at is None
-                    else False
-                ),
+                "tentativa_manual_necessaria": retry_at is None,
                 "headers": erro.headers,
             }
         headers = {}
-        if erro.status == 429 and erro.retry_at is not None:
+        if (
+            erro.status == 429
+            and isinstance(erro, WeatherRateLimitError)
+            and erro.retry_at is not None
+        ):
             segundos = max(
                 0,
                 ceil((erro.retry_at - datetime.now(timezone.utc)).total_seconds()),
             )
             headers["Retry-After"] = str(segundos)
         self._responder_json(erro.status, dados, headers=headers)
+
+    @staticmethod
+    def _validar_coordenadas(dados):
+        latitude = dados.get("latitude")
+        longitude = dados.get("longitude")
+        if (
+            isinstance(latitude, bool)
+            or isinstance(longitude, bool)
+            or not isinstance(latitude, (int, float))
+            or not isinstance(longitude, (int, float))
+            or not math.isfinite(latitude)
+            or not math.isfinite(longitude)
+            or not -90 <= latitude <= 90
+            or not -180 <= longitude <= 180
+        ):
+            return None
+        return latitude, longitude
 
     def _responder_json(self, status, dados, headers=None):
         conteudo = json.dumps(dados, ensure_ascii=False).encode("utf-8")
