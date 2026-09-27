@@ -1,0 +1,133 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="theme-color" content="#10263e" />
+    <meta name="description" content="Consulte a previsão do tempo para sua cidade, hoje ou nos próximos dias." />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <title>Global Forecast</title>
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <link rel="icon" href="/icons/icon.svg" type="image/svg+xml" />
+    <link rel="apple-touch-icon" href="/icons/icon-192.png" />
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin="" />
+    <link rel="stylesheet" href="/styles.css" />
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin="" defer></script>
+    <script src="/app.js" defer></script>
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="topbar">
+        <a class="brand" href="/" aria-label="Global Forecast, início">
+          <span class="brand-mark" aria-hidden="true">☼</span>
+          <span>Global<span class="brand-light"> Forecast</span></span>
+        </a>
+        <span class="live-label"><span aria-hidden="true"></span> Condições atuais</span>
+      </header>
+
+      <main>
+        <section class="intro" aria-labelledby="page-title">
+          <p class="eyebrow">MONITORAMENTO GLOBAL</p>
+          <h1 id="page-title">O tempo ao redor<br /><span>do planeta.</span></h1>
+          <p class="intro-copy">Acompanhe as condições atuais em cidades de diferentes regiões do mundo.</p>
+        </section>
+
+        <section class="weather-map-panel" aria-labelledby="weather-map-title">
+          <div class="map-header">
+            <div>
+              <p class="eyebrow">MAPA CLIMÁTICO</p>
+              <h2 id="weather-map-title">Condições meteorológicas atuais</h2>
+            </div>
+            <div class="map-badges">
+              <span>Open-Meteo</span>
+              <span>Atualização a cada 2 min</span>
+            </div>
+          </div>
+          <div id="weather-map" aria-label="Mapa das condições meteorológicas atuais em cidades do mundo"></div>
+          <p class="map-status" id="map-status" role="status" aria-live="polite">Carregando condições meteorológicas...</p>
+          <div class="map-toolbar">
+            <button type="button" class="map-mode active" data-mode="temperature">Temperatura</button>
+            <button type="button" class="map-mode" data-mode="rain">Chuva</button>
+            <button type="button" class="map-mode" data-mode="wind">Ventos</button>
+            <button type="button" class="map-mode" data-mode="storm">Trovoadas</button>
+          </div>
+        </section>
+
+        <form class="search-card" id="weather-form">
+          <div class="field field-city">
+            <label for="city">Cidade</label>
+            <div class="input-wrap">
+              <span class="input-icon" aria-hidden="true">⌖</span>
+              <input id="city" name="city" type="text" placeholder="Ex.: São Paulo" autocomplete="address-level2" maxlength="120" required />
+            </div>
+          </div>
+          <div class="field field-date">
+            <label for="forecast-date">Data da previsão</label>
+            <div class="input-wrap">
+              <span class="input-icon calendar-icon" aria-hidden="true">▦</span>
+              <input id="forecast-date" name="date" type="date" required />
+            </div>
+          </div>
+          <button class="search-button" id="search-button" type="submit">
+            <span class="button-label">Consultar previsão</span>
+            <span aria-hidden="true">→</span>
+          </button>
+        </form>
+
+        <p class="form-message" id="form-message" role="status" aria-live="polite"></p>
+
+        <section class="empty-state" id="empty-state" aria-label="Como consultar a previsão">
+          <div class="empty-illustration" aria-hidden="true"><span>☁</span><i>✦</i></div>
+          <p class="empty-title">Um bom dia começa com uma boa previsão.</p>
+          <p>Escolha uma cidade e uma data para ver como vai estar o tempo.</p>
+        </section>
+
+        <section class="forecast" id="forecast" aria-labelledby="forecast-city" hidden>
+          <div class="forecast-heading">
+            <div>
+              <p class="eyebrow">PREVISÃO PARA</p>
+              <h2 id="forecast-city"></h2>
+              <p class="forecast-date" id="forecast-date-label"></p>
+            </div>
+            <div class="condition-icon" id="condition-icon" aria-hidden="true"></div>
+          </div>
+          <article class="condition-card">
+            <p class="condition-label">CONDIÇÃO DO TEMPO</p>
+            <h3 id="condition"></h3>
+            <p>Veja os detalhes para planejar melhor o seu dia.</p>
+          </article>
+          <div class="details-grid" aria-label="Detalhes da previsão">
+            <article class="detail-card rain-card">
+              <div class="detail-top"><span class="detail-icon" aria-hidden="true">◉</span><span>CHUVA</span></div>
+              <strong id="rain"></strong>
+              <p>Probabilidade</p>
+            </article>
+            <article class="detail-card temperature-card">
+              <div class="detail-top"><span class="detail-icon" aria-hidden="true">↕</span><span>TEMPERATURA</span></div>
+              <strong><span id="temperature-max"></span><span class="temperature-divider"> / </span><span id="temperature-min"></span></strong>
+              <p>Máxima / mínima</p>
+            </article>
+            <article class="detail-card">
+              <div class="detail-top"><span class="detail-icon" aria-hidden="true">◌</span><span>UMIDADE</span></div>
+              <strong id="humidity"></strong>
+              <p>Umidade média</p>
+            </article>
+            <article class="detail-card">
+              <div class="detail-top"><span class="detail-icon" aria-hidden="true">≋</span><span>VENTO</span></div>
+              <strong id="wind"></strong>
+              <p>Velocidade máxima</p>
+            </article>
+          </div>
+          <p class="data-note">Previsão fornecida pelo Open-Meteo. As condições podem mudar.</p>
+        </section>
+      </main>
+
+      <footer class="app-footer">
+        <span class="footer-mark" aria-hidden="true">☼</span>
+        <p>Feito para acompanhar seus planos, faça chuva ou faça sol.</p>
+      </footer>
+    </div>
+  </body>
+</html>
