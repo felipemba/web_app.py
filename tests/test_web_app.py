@@ -169,6 +169,38 @@ class WeatherWebAppTests(unittest.TestCase):
         self.assertIn("próximos 16 dias", str(erro.exception))
         buscar_cidade.assert_not_called()
 
+    def test_requests_the_exact_forecast_date_from_weather_api(self):
+        data_futura = date.today() + timedelta(days=3)
+        local = {
+            "name": "Recife",
+            "country": "Brasil",
+            "latitude": -8.05,
+            "longitude": -34.9,
+        }
+        resposta_diaria = {
+            "daily": {
+                "time": [data_futura.isoformat()],
+                "weather_code": [1],
+                "temperature_2m_min": [23],
+                "temperature_2m_max": [30],
+                "precipitation_probability_max": [10],
+                "relative_humidity_2m_mean": [70],
+                "wind_speed_10m_max": [15],
+            }
+        }
+
+        with (
+            patch("weather._buscar_cidade", return_value=local),
+            patch("weather._get_json", return_value=resposta_diaria) as get_json,
+        ):
+            previsao = weather.consultar_previsao("Recife", data_futura)
+
+        self.assertEqual(previsao["data"], data_futura.strftime("%d/%m/%Y"))
+        parametros = get_json.call_args.args[1]
+        self.assertEqual(parametros["start_date"], data_futura.isoformat())
+        self.assertEqual(parametros["end_date"], data_futura.isoformat())
+        self.assertNotIn("forecast_days", parametros)
+
     def test_accepts_dates_up_to_two_years_ahead(self):
         hoje = date(2026, 2, 28)
 

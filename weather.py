@@ -169,7 +169,8 @@ def consultar_previsao(nome_cidade, data, escolha_cidade=None):
                 "wind_speed_10m_max"
             ),
             "timezone": "auto",
-            "forecast_days": dias,
+            "start_date": data.isoformat(),
+            "end_date": data.isoformat(),
         },
     )
 
@@ -185,7 +186,10 @@ def consultar_previsao(nome_cidade, data, escolha_cidade=None):
         umidade = diario["relative_humidity_2m_mean"][indice]
         vento = diario["wind_speed_10m_max"][indice]
     except (KeyError, IndexError, ValueError, TypeError) as erro:
-        raise WeatherError("a previsão para essa data não está disponível.") from erro
+        raise WeatherError(
+            f"a API meteorológica não retornou dados para "
+            f"{data.strftime('%d/%m/%Y')}; tente novamente mais tarde."
+        ) from erro
 
     try:
         condicao = WEATHER_CODES.get(int(codigo), "Condição desconhecida")
